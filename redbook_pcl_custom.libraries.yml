@@ -1,0 +1,9 @@
+redbook_pcl_custom_css:
+  version: 1.x
+  css:
+    theme:
+      css/redbook_pcl_custom.css: {}
+  js:
+      js/redbook_pcl_custom.js: {}
+  dependencies:
+    - core/jquery

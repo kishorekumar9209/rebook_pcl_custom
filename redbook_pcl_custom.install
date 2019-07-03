@@ -1,0 +1,287 @@
+<?php
+
+/**
+ * @file
+ * Install File for Redbook Pcl.
+ */
+
+use \Drupal\taxonomy\Entity\Term;
+use Drupal\node\Entity\Node;
+use Drupal\Core\Database\Database;
+use Drupal\paragraphs\Entity\Paragraph;
+
+/**
+ * Updating the depth field for taxonomy terms
+ *//*
+function redbook_pcl_custom_update_8100() {
+  $terms = \Drupal::entityTypeManager()
+    ->getStorage('taxonomy_term')
+    ->loadTree('produce_category_vocabulary', 0, NULL, TRUE);
+  foreach ($terms as $term) {
+    if (empty($term->field_depth->value)) {
+      $existing_term = Term::load($term->id());
+      $existing_term->set('field_depth', $term->depth);
+      $existing_term->save();
+      echo $existing_term->id() . "/n";
+    }
+  }
+}
+
+function redbook_pcl_custom_update_8101() {
+  $conn = Database::getConnection();
+  $query = $conn->select('node_field_data', 'node_field_data');
+  $query->fields('node_field_data', array('nid'));
+  $query->condition('node_field_data.type', 'produce_category');
+  $query->leftJoin('node__field_pc_large_feature_image', 'node__field_pc_large_feature_image', 'node__field_pc_large_feature_image.entity_id = node_field_data.nid');
+  $query->isNull('node__field_pc_large_feature_image.entity_id');
+  $category_nodes = $query->execute()->fetchAll();
+  if (!empty($category_nodes)) {
+    updateNodes($category_nodes, 'field_pc_large_feature_image');
+  }
+
+  $conn = Database::getConnection();
+  $query = $conn->select('node_field_data', 'node_field_data');
+  $query->fields('node_field_data', array('nid'));
+  $query->condition('node_field_data.type', 'commodity');
+  $query->leftJoin('node__field_cm_large_feature_image', 'node__field_cm_large_feature_image', 'node__field_cm_large_feature_image.entity_id = node_field_data.nid');
+  $query->isNull('node__field_cm_large_feature_image.entity_id');
+  $commodity_nodes = $query->execute()->fetchAll();
+  if (!empty($commodity_nodes)) {
+    updateNodes($commodity_nodes, 'field_cm_large_feature_image');
+  }
+
+  $conn = Database::getConnection();
+  $query = $conn->select('node_field_data', 'node_field_data');
+  $query->fields('node_field_data', array('nid'));
+  $query->condition('node_field_data.type', 'variety');
+  $query->leftJoin('node__field_vr_large_feature_image', 'node__field_vr_large_feature_image', 'node__field_vr_large_feature_image.entity_id = node_field_data.nid');
+  $query->isNull('node__field_vr_large_feature_image.entity_id');
+  $variety_nodes = $query->execute()->fetchAll();
+  if (!empty($variety_nodes)) {
+    updateNodes($variety_nodes, 'field_vr_large_feature_image');
+  }
+}
+
+function updateNodes($nodes, $field) {
+  foreach ($nodes as $node_id) {
+    $node = Node::load($node_id->nid);
+    $image = $node->get($field)->getValue();
+    if (empty($image[0]['target_id'])) {
+      $conn = Database::getConnection();
+      $query = $conn->select('file_managed', 'f');
+      $query->fields('f', ['fid']);
+      $query->condition('filename', 'default_pmg_image.png');
+      $fid = $query->execute()->fetchfield();
+      $node->set($field, $fid);
+      $node->save();
+    }
+  }
+}
+function redbook_pcl_custom_update_8204()
+{
+    //$conn = Database::getConnection();
+    $nids = \Drupal::entityQuery('node')->condition('type','company')->execute();
+    foreach ($nids as $nid) {
+        $nodes = \Drupal\node\Entity\Node::load($nid);
+        if (!empty($nodes->field_comp_rbcs_rating->getValue()[0]['value'])) {
+            $item_id = $nodes->field_comp_rbcs_rating->getValue()[0]['value'];
+            $field_collection_data = Drupal\field_collection\Entity\FieldCollectionItem::load($item_id);
+            if (!empty($field_collection_data->field_comp_fc_numeric->getValue()[0]['value'])) {
+                $rbcs_numeric_data = $field_collection_data->field_comp_fc_numeric->getValue()[0]['value'];
+                $nodes->field_listing_codes = $rbcs_numeric_data;
+                $nodes->save();
+                echo $nodes->id().'<br>';
+            }
+        }
+    }
+}*/
+
+/**
+ * Updating the Company node status if the inactive field is set.
+ */
+function redbook_pcl_custom_update_8205() {
+  $query = \Drupal::entityQuery('node');
+  $query->condition('status', 1);
+  $query->condition('type', 'company');
+  $query->condition('field_comp_inactive', '1');
+  $entity_ids = $query->execute();
+
+  foreach ($entity_ids as $entity_id) {
+    $service = \Drupal::service('redbook_pcl_custom.company');
+    $company = $service->load($entity_id);
+    if ($company->isPublished()) {
+      $company->status = FALSE;
+      $company->save();
+    }
+  }
+}
+
+/**
+ * Updating the Company PMG Pin.
+ */
+function redbook_pcl_custom_update_8207() {
+  // Fetch all the companies with empty PMG PIN.
+  $query = \Drupal::entityQuery('node');
+  $query->condition('status', 1);
+  $query->condition('type', 'company');
+  $query->notExists('field_comp_pmg_pin');
+  $entity_ids = $query->execute();
+
+  foreach ($entity_ids as $revision_id => $entity_id) {
+    $service = \Drupal::service('redbook_pcl_custom.company');
+    $company = $service->load($entity_id);
+    $primary_op = $company->get('field_comp_operation_primary')->target_id;
+    if ($primary_op) {
+      // Get the parent for the selected primary operation.
+      $storage = \Drupal::service('entity_type.manager')->getStorage('taxonomy_term');
+      $primary_op_parents = $storage->loadParents($primary_op);
+      if (!empty($primary_op_parents)) {
+        $max_pin_value = NULL;
+        foreach ($primary_op_parents as $primary_op_parent_id => $primary_op_parent) {
+          $primary_op_parent_name = $primary_op_parent->getName();
+          switch ($primary_op_parent_name) {
+            case 'Transportation':
+              // Get the maximum pin value that starts with 2000000 - 3000000 / 6000000 - 7000000.
+              $max_pin_value = get_max_pin_within_range(2000000, 3000000, 6000000, 7000000);
+              break;
+            case 'Floral':
+              // Get the maximum pin value that starts with 3000000 - 4000000.
+              $max_pin_value = get_max_pin_within_range(3000000, 4000000, NULL, NULL);
+              break;
+            // By default, if the parent not found, considering the they fall into Produce category.
+            default:
+              // Get the maximum pin value that starts with 1000000 - 2000000 / 5000000 - 6000000.
+              $max_pin_value = get_max_pin_within_range(1000000, 2000000, 5000000, 6000000);
+              break;
+          }
+          if ($max_pin_value != 0) {
+            $pmg_pin = $max_pin_value;
+            $company->set('field_comp_pmg_pin', array($pmg_pin));
+            $company->save();
+          }
+        }
+      }
+    }
+    else {
+      // Companies without PMG PIN.
+      $companies_without_primary_op[$entity_id] = $entity_id;
+    }
+  }
+  \Drupal::logger('Companies without Primary operation: ')->info('<pre>'.print_r($companies_without_primary_op,true).'</pre>');
+}
+
+
+/**
+ * Updating data in the node__field_lic_expiration table.
+ *
+ */
+function redbook_pcl_custom_update_8208() {
+  drupal_set_time_limit(0);
+  $conn = Database::getConnection();
+  $query = $conn->select('node__field_lic_expiration', 'nfl');
+  $query->fields('nfl', array('field_lic_expiration_value', 'entity_id'));
+  $old_date = $query->execute()->fetchAll();
+  foreach ($old_date as $did) {
+    $date[] = $did;
+    foreach ($date as $key => $value) {
+      $id = $value;
+    } 
+    $new_date = explode(" ", $id->field_lic_expiration_value);
+    $new_dates = explode("-", $new_date[0]);
+    $new = $new_dates[1].'/'.$new_dates[2].'/'.$new_dates[0];
+    $entity_id = $id->entity_id;
+    $conn = Database::getConnection();
+    $query = $conn->update('node__field_lic_expiration')->condition('entity_id', $entity_id)->fields([ 'field_lic_expiration_value' => $new])->execute();
+  }
+}
+
+/**
+ * Updating data in the node__field_lic_type table.
+ *
+ */
+function redbook_pcl_custom_update_8209() {
+  drupal_set_time_limit(0);
+  $conn = Database::getConnection();
+  $query = $conn->update('node__field_lic_type');
+  $query->expression('field_lic_type_value', 'trim(field_lic_type_value)');
+  $data = $query->execute();
+  $count = $count+1;
+  echo 'Processing: ' . $count . '\n';
+}
+
+/**
+ * Updating Contact type from Cel to Mobile.
+ *
+ */
+function redbook_pcl_custom_update_8301() {
+  drupal_set_time_limit(0);
+
+  $conn = \Drupal::database();
+  $query = $conn->select('node__field_cont_phones', 'nfcp');
+  $query->leftJoin('paragraph__field_cont_phone_num', 'pfcpn', 'nfcp.field_cont_phones_target_id = pfcpn.entity_id AND nfcp.field_cont_phones_target_revision_id = pfcpn.revision_id');
+  $query->leftJoin('paragraph__field_cont_phone_num_type', 'pfcpnt', 'nfcp.field_cont_phones_target_id = pfcpnt.entity_id AND nfcp.field_cont_phones_target_revision_id = pfcpnt.revision_id');
+  $query->condition('pfcpnt.field_cont_phone_num_type_value', 'Cel');
+  $query->fields('nfcp', array('entity_id', 'field_cont_phones_target_id'));
+  $results = $query->execute()->fetchAll();
+  $count = 0;
+
+  foreach ($results as $result) {
+    $cont_paragraph = Paragraph::load($result->field_cont_phones_target_id);
+    $cont_paragraph->set('field_cont_phone_num_type', 'Mobile');
+    $cont_paragraph->save();
+    $count = $count + 1;
+    echo 'Updated: ' . $count . ' value\n';
+  }
+
+}
+
+/**
+ * Making the companies inactive with numeric value as 79.
+ */
+function redbook_pcl_custom_update_8302() {
+  $conn = \Drupal::Database();
+  $query = $conn->select('node_field_data', 'node_field_data');
+  $query->join('node__field_comp_rbcs_rating', 'node__field_comp_rbcs_rating', 'node_field_data.nid = node__field_comp_rbcs_rating.entity_id');
+  $query->join('field_collection_item__field_comp_fc_numeric', 'field_collection_item__field_comp_fc_numeric', 'node__field_comp_rbcs_rating.field_comp_rbcs_rating_value = field_collection_item__field_comp_fc_numeric.entity_id');
+  $query->fields('node_field_data', ['title','nid']);
+  $query->fields('field_collection_item__field_comp_fc_numeric', ['field_comp_fc_numeric_value']);
+  $query->condition('field_collection_item__field_comp_fc_numeric.field_comp_fc_numeric_value', '%(79)%', 'LIKE');
+  $results = $query->execute()->fetchAll();
+  $count = 0;
+  $results_count = count($results);
+
+  foreach ($results as $result) {
+    $node_id = $result->nid;
+    $service = \Drupal::service('redbook_pcl_custom.company');
+    $node_details = $service->load($node_id);
+    $node_details->set('field_comp_inactive', '1');
+    $node_details->status->setValue('0');
+    $node_details->save();
+    $count = $count + 1;
+    echo "\033[31m Processed node id: " . $node_id ."\033[0m \033[32m Processing " . $count . "/" . $results_count . "\033[0m <\n>";
+  }
+}
+
+/**
+ * Udating the text field to long text for field_map_value.
+ */
+// Commenting the update hook. This should be done as batch as it is reaching a
+// time out error. No need of running this on dev/test.
+//Just keeping it as reference that we have adding this to update.
+/*function redbook_pcl_custom_update_8304() {
+  $query = \Drupal::database()->select('node__field_map_value', 'nfmv');
+  $query->fields('nfmv', ['entity_id']);
+  $query->orderBy('nfmv.entity_id');
+  $company_ids = $query->execute()->fetchAll();
+  $count = 0;
+  $results_count = count($company_ids);
+
+  foreach ($company_ids as $key => $entity) {
+    $service = \Drupal::service('redbook_pcl_custom.company');
+    $node = $service->load($entity->entity_id);
+    $node->set('field_comp_map_value', $node->get('field_map_value')->value);
+    $node->save();
+    $count = $count + 1;
+    echo "\033[31m Processed node id: " . $entity->entity_id ."\033[0m \033[32m Processing " . $count . "/" . $results_count . "\033[0m <\n>";
+  }
+}*/

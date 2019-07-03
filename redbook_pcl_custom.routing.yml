@@ -1,0 +1,128 @@
+redbook_pcl_custom.unsubscribeEmail:
+  path: '/unsubscribe/i_wanna_play/{emailsalt}'
+  defaults:
+    _controller: '\Drupal\redbook_pcl_custom\Controller\TermController::unsubscribeEmail'
+  requirements:
+    _permission: 'access content'
+redbook_pcl_custom.companybatch:
+  path: '/company-batch'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\CompanyBatchForm'
+    _title: 'Batch Process to Update latitude and Longitude Values'
+  requirements:
+    _permission: 'administer content'
+redbook_pcl_custom.companybatchorganic:
+  path: '/company-batch-organic'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\CompanyBatchOrganicForm'
+    _title: 'Batch Process to Update Organic Values'
+  requirements:
+    _permission: 'administer content'
+redbook_pcl_custom.updatesocialmedia:
+  path: '/update-social-media'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\UpdateSocialMedia'
+    _title: 'Update Social Media URL Link field'
+  requirements:
+    _permission: 'administer content'
+redbook_pcl_custom.enableverifythiscompany:
+  path: '/verify-this-company-batch'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\VerifyCompanyBatchForm'
+    _title: 'Enable checkbox verify this company when company status as verified(without claim)'
+  requirements:
+    _permission: 'administer content'
+redbook_pcl_custom.updatephonefield:
+  path: '/update-phone-field'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\UpdatePhoneFieldValue'
+    _title: 'Update Phone field from field collection to paragraph'
+  requirements:
+    _permission: 'administer content'
+redbook_pcl_custom.updatecontactfield:
+  path: '/update-contact-field'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\UpdatePersonnelContact'
+    _title: 'Update contact field from entity reference to entity reference revision'
+  requirements:
+    _permission: 'administer content'
+
+redbook_pcl_custom.updatelicensefield:
+  path: '/update-license-field'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\UpdateCompanyLicense'
+    _title: 'Update legacy field from entity reference to entity reference revision'
+  requirements:
+    _permission: 'administer content'
+
+redbook_pcl_custom.updatecontactnodefields:
+  path: '/update-contact-node-fields'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\UpdateCompanyContactNodeFields'
+    _title: 'Update Contact node fields from entity reference to entity reference revision'
+  requirements:
+    _permission: 'administer content'
+
+redbook_pcl_custom.updateoperationsfield:
+  path: '/update-operations-field'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\CompanyBatchOperationsUpdate'
+    _title: 'Update operations field'
+  requirements:
+    _permission: 'administer content'
+
+redbook_pcl_custom.updatewhereiwork:
+ path: '/update-where-i-work'
+ defaults:
+   _form: '\Drupal\redbook_pcl_custom\Form\UpdateWhereIWork'
+   _title: 'Batch Process to Update companies to their where i work'
+ requirements:
+   _permission: 'administer content'
+
+redbook_pcl_custom.updatepaypolicyratingfield:
+  path: '/update-pay-policy-rating-field'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\PayPolicyRatingUpdate'
+    _title: 'Update Pay Policy Rating field'
+  requirements:
+    _permission: 'administer content'
+
+redbook_pcl_custom.updategeomaplatlong:
+  path: '/update-geomap-latlong-field'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\UpdateGeomapLatLong'
+    _title: 'Update Latitude and Longitude Fields in company cck'
+  requirements:
+    _permission: 'administer content'
+
+redbook_pcl_custom.removebuyeroperation:
+  path: '/remove-buyer-operation'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\CompanyRemoveBuyerOpType'
+    _title: 'Remove Buyer Operation from Primary, Secondary Operation Types'
+  requirements:
+    _permission: 'administer content'
+
+redbook_pcl_custom.updatecompanyurlalias:
+  path: '/update-company-url-alias'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\CompanyUpdateUrlAlias'
+    _title: 'Update Company url alias'
+  requirements:
+    _permission: 'administer content'
+
+redbook_pcl_custom.companysave:
+  path: '/company-save'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\CompanySave'
+    _title: 'Update Company url alias'
+  requirements:
+    _permission: 'administer content'
+    
+redbook_pcl_custom.updatebluebookrating:
+  path: '/update-blue-book-rating-url'
+  defaults:
+    _form: '\Drupal\redbook_pcl_custom\Form\UpdateBlueBookRating'
+    _title: 'Update Blue Book Rating URL'
+  requirements:
+    _permission: 'administer content'

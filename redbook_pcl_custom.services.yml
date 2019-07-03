@@ -1,0 +1,20 @@
+services:
+ redbook_pcl_custom.breadcrumb:
+   class: Drupal\redbook_pcl_custom\CustomBreadcrumb
+   tags:
+    - { name: breadcrumb_builder, priority: 100 }
+ redbook_pcl_custom.company_node_save:
+   class: Drupal\redbook_pcl_custom\CompanySave
+ redbook_pcl_custom.company:
+   class: Drupal\redbook_pcl_custom\Company
+ redbook_pcl_custom.get_notification_count:
+   class: Drupal\redbook_pcl_custom\GetNotificationCount
+ redbook_pcl_custom.route_subscriber:
+   class: Drupal\redbook_pcl_custom\Routing\MenuAlter
+   tags:
+     - { name: event_subscriber }
+ redbook_pcl_custom.config_importer:
+   class: Drupal\redbook_pcl_custom\EventSubscriber\SolrConfigImporterEventSubscriber
+   arguments: ['@config.manager', '@config.storage']
+   tags:
+     - { name: 'event_subscriber' }

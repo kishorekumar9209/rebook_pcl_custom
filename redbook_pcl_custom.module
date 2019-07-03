@@ -1,0 +1,1770 @@
+<?php
+
+/**
+ * @file
+ * Custom Module for Redbook PCL.
+ */
+use Drupal\field_collection\Entity\FieldCollectionItem;
+use Drupal\node\NodeInterface;
+use Drupal\Core\Session\AccountInterface;
+use Drupal\block\Entity\Block;
+use Drupal\node\Entity\Node;
+use Drupal\Core\Database\Database;
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Url;
+use Drupal\taxonomy\Entity\Term;
+use Symfony\Component\HttpFoundation\RedirectResponse;
+use Drupal\Core\Render\Markup;
+use Drupal\Core\Access\AccessResult;
+use Drupal\Core\Entity\EntityInterface;
+use Drupal\views\ViewExecutable;
+use Drupal\views\Plugin\views\query\QueryPluginBase;
+use CommerceGuys\Addressing\Subdivision\SubdivisionRepository;
+
+/**
+ * Implements hook_form_alter
+ * Alters the form.
+ *
+ * @param array $form
+ * @param \Drupal\Core\Form\FormStateInterface $form_state
+ * @param string $form_id
+ */
+function redbook_pcl_custom_form_alter(&$form, FormStateInterface $form_state, $form_id) {
+  //print_r($form_id);exit;
+
+  if ($form_id == 'node_license_edit_form') {
+    $node = \Drupal::routeMatch()->getParameter('node');
+    if ($node instanceof NodeInterface) {
+      // You can get nid and anything else you need from the node object.
+      $nid = $node->id();
+      // print_r($nid);exit;
+      $company_detail = _get_company_detail_license($nid);
+      // Read only fiels company name, pin, Location.
+      $form['text'] = [
+        '#type' => 'markup',
+        '#markup' => '<label><b>Company Name: </b></label>' . $company_detail['company_name'] . '</br><label><b>Pin: </b></label>' . $company_detail['pmg_pin'] . '</br><label><b>Location: </b></label>' . $company_detail['locality'] . ',' . $company_detail['state'],
+        '#prefix' => "<div class=''>",
+        '#suffix' => "</div>",
+        '#weight' => 2,
+      ];
+    }
+  }
+
+  // views-exposed-form-user-seat-management-page-3.
+  if ($form_id == 'views_exposed_form' && $form['#id'] == 'views-exposed-form-user-seat-management-page-3') {
+    $form['field_verify_this_company_value']['#options'][1] = 'Verified';
+    $form['field_verify_this_company_value']['#options'][0] = 'Unverified';
+    // Print '<pre>';print_r($form['field_verify_this_company_value']['#options']);exit;.
+  }
+  if ($form_id == 'contact_message_feedback_form') {
+    $form['valid_phone_number'] = [
+      '#type' => 'hidden',
+      '#attributes' => array('id' => array('validating-contact-phone-number')),
+      '#title' => 'phone number validation',
+    ];
+    $form['#validate'][] = 'custom_phone_number_validate';
+
+    $form['#attributes']['data-user-info-from-browser'] = FALSE;
+    $query_params = \Drupal::request()->getQueryString();
+    $membership = '';
+    $request_company = '';
+    if (!empty($query_params)) {
+      parse_str($query_params);
+      if ($membership) {
+        $form['field_contact_form_topic']['widget']['#value'] = 'Membership Inquiry';
+      }
+      elseif ($request_company) {
+        $form['field_contact_form_topic']['widget']['#value'] = 'Request to Add Company';
+      }
+    }
+  }
+  if ($form_id == 'node_commodity_edit_form' || $form_id == 'node_commodity_form') {
+    $form_state_input = $form_state->getUserInput();
+    $form_state_values = $form_state->getValues();
+    $build_info = $form_state->getBuildInfo()['callback_object'];
+
+    $selected_cm_commodity_id = '';
+    if (!empty($build_info)) {
+      $entity = $build_info->getEntity();
+      if (!empty($entity->get('field_cm_commodity')->target_id)) {
+        $selected_cm_commodity_id = $entity->get('field_cm_commodity')->target_id;
+      }
+      elseif (!empty($form_state_input['cm_commodity']) && $form_state->isRebuilding() && $build_info->getOperation() == 'default') {
+        $selected_cm_commodity_id = $form_state_input['cm_commodity'];
+      }
+      if ($build_info->getOperation() == 'edit' && !empty($form_state_values['cm_commodity']) && $selected_cm_commodity_id != $form_state_values['cm_commodity']) {
+        $selected_cm_commodity_id = $form_state_values['cm_commodity'];
+      }
+    }
+    // Custom field for Name.
+    $form['cm_commodity'] = [
+      '#type' => 'select',
+      '#title' => ('Name'),
+      '#options' => redbook_pcl_custom_get_terms('commodity'),
+      '#required' => TRUE,
+      '#default_value' => !empty($selected_cm_commodity_id) ? $selected_cm_commodity_id : '',
+      '#ajax' => [
+        'callback' => 'Drupal\redbook_pcl_custom\Controller\TermController::fetchCategory',
+        'wrapper' => 'get-cm-commodity',
+        'progress' => [
+          'type' => 'throbber',
+          'message' => NULL,
+        ],
+      ],
+    ];
+    $form['field_cm_fc_produce_category']['#prefix'] = '<div id="get-cm-commodity">';
+    $form['field_cm_fc_produce_category']['#suffix'] = '</div>';
+
+    // Changing the options of Category based on commodity selected.
+    if (!empty($selected_cm_commodity_id)) {
+      $storage = \Drupal::service('entity_type.manager')->getStorage('taxonomy_term');
+      $commodity_parents = $storage->loadParents($selected_cm_commodity_id);
+      $category_options = [];
+      foreach ($commodity_parents as $term_id => $term) {
+        $category_options[$term_id] = $term->getName();
+      }
+      foreach ($form['field_cm_fc_produce_category']['widget'] as $pc_index => $pc_item) {
+        if (is_numeric($pc_index)) {
+          $form['field_cm_fc_produce_category']['widget'][$pc_index]['field_fc_produce_category']['widget']['#options'] = $category_options;
+        }
+      }
+    }
+
+    $form['#attached']['library'][] = 'redbook_pcl_custom/redbook_pcl_custom_css';
+    $form['#validate'][] = 'redbook_pcl_commodity_form_validate';
+    if ($form_state->isRebuilding()) {
+      // Unsetting the selected options for Get Connected.
+      foreach ($form_state_input['field_fc_get_connected'] as $item_index => $item) {
+        if (is_numeric($item_index) && $item['field_get_con_fc_type'] != '_none') {
+          $selected_values[] = $item['field_get_con_fc_type'];
+        }
+      }
+      foreach ($selected_values as $key => $option_value) {
+        if ($option_value != '_none' || $option_value != 'null') {
+          unset($form['field_fc_get_connected']['widget'][$item_index + 1]['field_get_con_fc_type']['widget']['#options'][$option_value]);
+        }
+      }
+
+      // Unsetting the validateuri for field_get_con_fc_url, as unable to overwrite the error message generated
+      //   for internal links.
+      foreach ($form['field_fc_get_connected']['widget'] as $gc_index => $gc) {
+        if (is_numeric($gc_index)) {
+          if ($found = array_search('validateUriElement', $form['field_fc_get_connected']['widget'][$gc_index]['field_get_con_fc_url']['widget'][0]['uri']['#element_validate'][0])) {
+            unset($form['field_fc_get_connected']['widget'][$gc_index]['field_get_con_fc_url']['widget'][0]['uri']['#element_validate'][0][$found]);
+          }
+        }
+      }
+    }
+  }
+  if ($form_id == 'node_produce_category_edit_form' || $form_id == 'node_produce_category_form') {
+    $form['#attached']['library'][] = 'redbook_pcl_custom/redbook_pcl_custom_css';
+    $form['#validate'][] = 'redbook_pcl_custom_produce_category_validate';
+  }
+  if ($form_id == 'node_variety_edit_form' || $form_id == 'node_variety_form') {
+    $form_state_input = $form_state->getUserInput();
+    $form_state_values = $form_state->getValues();
+    $build_info = $form_state->getBuildInfo()['callback_object'];
+
+    $selected_vr_variety_id = '';
+    if (!empty($build_info)) {
+      $entity = $build_info->getEntity();
+      if (!empty($entity->get('field_vr_variety')->target_id)) {
+        $selected_vr_variety_id = $entity->get('field_vr_variety')->target_id;
+      }
+      elseif (!empty($form_state_input['vr_variety']) && $form_state->isRebuilding() && $build_info->getOperation() == 'default') {
+        $selected_vr_variety_id = $form_state_input['vr_variety'];
+      }
+      if ($build_info->getOperation() == 'edit' && !empty($form_state_values['vr_variety']) && $selected_vr_variety_id != $form_state_values['vr_variety']) {
+        $selected_vr_variety_id = $form_state_values['vr_variety'];
+      }
+    }
+    // Custom field for Name.
+    $form['vr_variety'] = [
+      '#type' => 'select',
+      '#title' => ('Name'),
+      '#options' => redbook_pcl_custom_get_terms('variety'),
+      '#required' => TRUE,
+      '#default_value' => !empty($selected_vr_variety_id) ? $selected_vr_variety_id : '',
+      '#ajax' => [
+        'callback' => 'Drupal\redbook_pcl_custom\Controller\TermController::fetchCommodity',
+        'wrapper' => 'get-vr-variety',
+        'progress' => [
+          'type' => 'throbber',
+          'message' => t('fetching...'),
+        ],
+      ],
+    ];
+    $form['field_vr_fc_commodity']['#prefix'] = '<div id="get-vr-variety">';
+    $form['field_vr_fc_commodity']['#suffix'] = '</div>';
+
+    // Changing the options of Commodity based on variety selected.
+    if (!empty($selected_vr_variety_id)) {
+      $storage = \Drupal::service('entity_type.manager')->getStorage('taxonomy_term');
+      $variety_parents = $storage->loadParents($selected_vr_variety_id);
+      $commodity_options = [];
+      foreach ($variety_parents as $term_id => $term) {
+        $commodity_options[$term_id] = $term->getName();
+      }
+      foreach ($form['field_vr_fc_commodity']['widget'] as $pc_index => $pc_item) {
+        if (is_numeric($pc_index)) {
+          $form['field_vr_fc_commodity']['widget'][$pc_index]['field_fc_commodity']['widget']['#options'] = $commodity_options;
+        }
+      }
+    }
+
+    $form['#attached']['library'][] = 'redbook_pcl_custom/redbook_pcl_custom_css';
+    $form['#validate'][] = 'redbook_pcl_custom_variety_validate';
+  }
+
+  if (in_array($form_id, ['contact_message_i_wanna_play_form'])) {
+    $form['text'] = [
+      '#type' => 'markup',
+      '#prefix' => "<div class='custom-i-wanna-play-text'>",
+      '#markup' => t("Let us keep you current on new features and happenings on the new Produce Market Guide "),
+      '#suffix' => "</div>",
+      '#weight' => -1,
+    ];
+    $form['mail']['#title'] = 'Email Address';
+    $form['#validate'][] = 'redbook_pcl_custom_subscribe_email_validate';
+    $form['mail']['#attributes']['placeholder'][] = 'Email Address';
+    $key = ($form_id == 'contact_message_i_wanna_play_form') ? 'actions' : 'basic';
+    $form[$key]['submit']['#value'] = 'Subscribe';
+    $form[$key]['preview']['#access'] = FALSE;
+    $form[$key]['submit']['#submit'][] = 'custom_message_contact_form';
+    // Here the cookies data reading for this form is disabled as requested by the client.
+    $form['#attributes']['data-user-info-from-browser'] = FALSE;
+  }
+
+  if (in_array($form_id, ['contact_message_mobile_delicious_form'])) {
+    $form['text'] = [
+      '#type' => 'markup',
+      '#prefix' => "<div class='custom-mobile-delicious'>",
+      '#markup' => t("Check us out via smartphone. Our new site is so mobile friendly, you'd think it was an app."),
+      '#suffix' => "</div>",
+      '#weight' => -1,
+    ];
+    $key = ($form_id == 'contact_message_mobile_delicious_form') ? 'actions' : 'basic';
+    $form[$key]['submit']['#value'] = 'Subscribe';
+    $form[$key]['preview']['#access'] = FALSE;
+  }
+  // admin/content page altering the "with selection" dropdown result as requested that delete option should not be on top.
+  if ($form_id == 'views_form_content_page_1') {
+    $selectOption = $form['header']['node_bulk_form']['action']['#options'];
+    if (is_array($selectOption)) {
+      $selectOption = ['Select an option' => '--Select an option--'] + $selectOption;
+    }
+    $form['header']['node_bulk_form']['action']['#options'] = $selectOption;
+  }
+  if ($form_id == 'views_form_file_entity_files_overview') {
+    $selectOption = $form['header']['bulk_form']['action']['#options'];
+    if (is_array($selectOption)) {
+      $selectOption = ['Select an option' => '--Select an option--'] + $selectOption;
+    }
+    $form['header']['bulk_form']['action']['#options'] = $selectOption;
+  }
+  if ($form_id == 'node_company_edit_form') {
+    $form['field_comp_address']['widget'][0]['address_line1']['#title'] = t('Address Line1');
+    unset($form['field_comp_address']['widget'][0]['address_line2']['#title_display']);
+    $form['field_comp_address']['widget'][0]['address_line2']['#title'] = t('Address Line2');
+    $form['field_comp_address']['widget'][0]['address_line1']['#weight'] = -5;
+    $form['field_comp_address']['widget'][0]['address_line1']['#required'] = FALSE;
+    $form['field_comp_address']['widget'][0]['address_line2']['#weight'] = -4;
+    $form['field_comp_address']['widget'][0]['address_line2']['#required'] = FALSE;
+    $form['field_comp_address']['widget'][0]['administrative_area']['#weight'] = -3;
+    $form['field_comp_address']['widget'][0]['administrative_area']['#required'] = FALSE;
+    $form['field_comp_address']['widget'][0]['locality']['#weight'] = -2;
+    $form['field_comp_address']['widget'][0]['locality']['#required'] = FALSE;
+    $form['field_comp_address']['widget'][0]['postal_code']['#weight'] = -1;
+    $form['field_comp_address']['widget'][0]['postal_code']['#required'] = FALSE;
+    $form['#validate'][] = 'redbook_pcl_custom_node_update_lat_long';
+    // Disable the PMG PIN, RBIT company ID fields for all users.
+    $form['field_comp_pmg_pin']['#disabled'] = TRUE;
+    $form['field_comp_rbit_comp_id']['#disabled'] = TRUE;
+    $form['#validate'][] = 'redbook_pcl_custom_bluebook_ratinbg_url';
+  }
+  if ($form_id == 'node_company_form') {
+
+    $form['#validate'][] = 'redbook_pcl_custom_validate_primary_operation';
+    // PMG PIN creation, Triggering only for Company node add form.
+    foreach (array_keys($form['actions']) as $action) {
+      if ($action != 'preview' && isset($form['actions'][$action]['#type']) && $form['actions'][$action]['#type'] === 'submit') {
+        array_unshift($form['actions']['submit']['#submit'], 'redbook_pcl_custom_pin_creation');
+      }
+    }
+    // Disable the PMG PIN, RBIT company ID fields for all users.
+    $form['field_comp_pmg_pin']['#disabled'] = TRUE;
+    $form['field_comp_rbit_comp_id']['#disabled'] = TRUE;
+    $form['#validate'][] = 'redbook_pcl_custom_node_update_lat_long';
+    $form['#validate'][] = 'redbook_pcl_custom_bluebook_ratinbg_url';
+  }
+  if ($form_id == 'node_company_business_user_company_edit_form') {
+    $form['#validate'][] = 'redbook_pcl_custom_node_update_lat_long';
+    $form['#validate'][] = 'redbook_pcl_custom_bluebook_ratinbg_url';
+  }
+}
+
+function custom_phone_number_validate($form, FormStateInterface $form_state) {
+  $validation = $form_state->getValue('valid_phone_number');
+  if ($validation == 0) {
+    $form_state->setErrorByName('field_phone_number', t('Please enter a correct phone number'));
+  }
+}
+
+/**
+ *
+ */
+function redbook_pcl_custom_pin_creation($form, FormStateInterface $form_state) {
+
+  $primary_op = $form_state->getValue('field_comp_operation_primary')[0]['target_id'];
+  // Get the parent for the selected primary operation.
+  $storage = \Drupal::service('entity_type.manager')->getStorage('taxonomy_term');
+  $primary_op_parents = $storage->loadParents($primary_op);
+  if (!empty($primary_op_parents)) {
+    $max_pin_value = NULL;
+    foreach ($primary_op_parents as $primary_op_parent_id => $primary_op_parent) {
+      $primary_op_parent_name = $primary_op_parent->getName();
+      switch ($primary_op_parent_name) {
+        case 'Transportation':
+          // Get the maximum pin value that starts with 2000000 - 3000000 / 6000000 - 7000000.
+          $max_pin_value = get_max_pin_within_range(2000000, 3000000, 6000000, 7000000);
+          break;
+
+        case 'Floral':
+          // Get the maximum pin value that starts with 3000000 - 4000000.
+          $max_pin_value = get_max_pin_within_range(3000000, 4000000, NULL, NULL);
+          break;
+
+        // By default, if the parent not found, considering the they fall into Produce category.
+        default:
+          // Get the maximum pin value that starts with 1000000 - 2000000 / 5000000 - 6000000.
+          $max_pin_value = get_max_pin_within_range(1000000, 2000000, 5000000, 6000000);
+          break;
+      }
+      if ($max_pin_value != 0) {
+        $pmg_pin = $max_pin_value;
+        $form_state->setValue('field_comp_pmg_pin', [$pmg_pin]);
+      }
+    }
+  }
+}
+
+/**
+ *
+ */
+function custom_message_contact_form($form, FormStateInterface $form_state) {
+  // When contact form get submitted Redirecting it to same page.
+  $current_path = \Drupal::service('path.current')->getPath();
+  $url = Url::fromUserInput($current_path);
+  drupal_set_message("Thank you for subscribing", $type = 'status', $repeat = FALSE);
+
+  $form_state->setRedirectUrl($url);
+}
+
+/**
+ * Validation for Contact Subscription form.
+ *
+ * @param $form
+ * @param \Drupal\Core\Form\FormStateInterface $form_state
+ */
+function redbook_pcl_custom_subscribe_email_validate(&$form, FormStateInterface $form_state) {
+  $form_state_values = $form_state->getValues();
+  $conn = Database::getConnection();
+  $query = $conn->select('contact_message', 'cm');
+  $query->fields('cm', ['id']);
+  $query->condition('mail', $form_state_values['mail']);
+  $query->condition('contact_form', 'i_wanna_play');
+  $email_entity_id = $query->execute()->fetchfield();
+  if (!empty($email_entity_id)) {
+    $form_state->setErrorByName('', t('This email id is already subscribed'));
+  }
+}
+
+/**
+ * Validation for Commodity form.
+ *
+ * @param $element
+ * @param \Drupal\Core\Form\FormStateInterface $form_state
+ */
+function redbook_pcl_commodity_form_validate(&$form, FormStateInterface $form_state) {
+  $form_state_values = $form_state->getValues();
+  $build_info = $form_state->getBuildInfo()['callback_object'];
+
+  // Getting the Id from the custom autocomplete field.
+  $cm_id = $form_state_values['cm_commodity'];
+  // Setting the Title if the term exists.
+  if (!empty($cm_id)) {
+    $term = Term::load($cm_id);
+
+    // Validation for Duplicate content.
+    $conn = Database::getConnection();
+    $query = $conn->select('node__field_cm_commodity', 'cm');
+    $query->fields('cm', ['entity_id']);
+    $query->condition('field_cm_commodity_target_id', $cm_id);
+    $result = $query->execute()->fetchAll();
+    if (($build_info->getOperation() == 'edit' && count($result) > 1) || ($build_info->getOperation() == 'default' && count($result) > 0)) {
+      $form_state->setErrorByName('cm_commodity', t('Please select another name , Name <b>@term</b> already exists.', ['@term' => $term->getName()]));
+    }
+    $form_state->setValue('title', $term->getName());
+    $form_state->setValue('field_cm_commodity', $cm_id);
+
+    // Validation for Produce Category Term selection.
+    $selected_pc = [];
+    $storage = \Drupal::service('entity_type.manager')->getStorage('taxonomy_term');
+    $commodity_parents = array_keys($storage->loadParents($cm_id));
+    foreach ($form_state_values['field_cm_fc_produce_category'] as $pc_index => $pc_item) {
+      if (is_numeric($pc_index)) {
+        if (!empty($pc_item['field_fc_produce_category'][0]['target_id'])) {
+          $selected_pc[] = $pc_item['field_fc_produce_category'][0]['target_id'];
+          // Validate if selected produce category term is linked to the given commodity.
+          if (!in_array($pc_item['field_fc_produce_category'][0]['target_id'], $commodity_parents)) {
+            $form_state->setErrorByName('field_cm_fc_produce_category][' . $pc_index . '][field_fc_produce_category', t('Please select the category that is associated with "!term"', ['!term' => $term->getName()]));
+          }
+        }
+      }
+    }
+    // Check for Duplicate selection.
+    if (count(array_unique($selected_pc)) < count($selected_pc)) {
+      $form_state->setErrorByName('field_cm_fc_produce_category', t('Please avoid Duplicate Selection'));
+    }
+  }
+  else {
+    $form_state->setErrorByName('cm_commodity', t('Please Select From Available Commodity'));
+  }
+
+  // Validation for Get Connected field.
+  foreach ($form_state_values['field_fc_get_connected'] as $item_index => $item_value) {
+    if (is_numeric($item_index) && !empty($item_value['field_get_con_fc_url'][0]['uri'])) {
+      preg_match("/(http|https):\/\/(.*?)$/i", $item_value['field_get_con_fc_url'][0]['uri'], $url_parts);
+      if (empty($url_parts)) {
+        $form_state->setErrorByName('field_fc_get_connected][' . $item_index . '][field_get_con_fc_url]', t('External Links should start with http:// or https://'));
+      }
+    }
+  }
+}
+
+/**
+ * Validation for Produce Category form.
+ *
+ * @param $form
+ * @param \Drupal\Core\Form\FormStateInterface $formState
+ */
+function redbook_pcl_custom_produce_category_validate(&$form, FormStateInterface $form_state) {
+  // Setting the Title if the term exists.
+  $pc_category_id = $form_state->getValue('field_pc_produce_category');
+  $build_info = $form_state->getBuildInfo()['callback_object'];
+  if (!empty($pc_category_id[0]['target_id'])) {
+    $term = Term::load($pc_category_id[0]['target_id']);
+    $form_state->setValue('title', $term->getName());
+
+    // Validation for Duplicate content.
+    $conn = Database::getConnection();
+    $query = $conn->select('node__field_pc_produce_category', 'pc');
+    $query->fields('pc', ['entity_id']);
+    $query->condition('field_pc_produce_category_target_id', $pc_category_id[0]['target_id']);
+    $result = $query->execute()->fetchAll();
+    if (($build_info->getOperation() == 'edit' && count($result) > 1) || ($build_info->getOperation() == 'default' && count($result) > 0)) {
+      $form_state->setErrorByName('cm_commodity', t('Please select another name , Name <b>@term</b> already exists.', ['@term' => $term->getName()]));
+    }
+  }
+  else {
+    $form_state->setErrorByName('field_pc_produce_category', t('Please Select from Available Category'));
+  }
+}
+
+/**
+ * Validation for Variety form.
+ *
+ * @param $form
+ * @param \Drupal\Core\Form\FormStateInterface $formState
+ */
+function redbook_pcl_custom_variety_validate(&$form, FormStateInterface $form_state) {
+  $form_state_values = $form_state->getValues();
+  $build_info = $form_state->getBuildInfo()['callback_object'];
+
+  // Getting the Id from the custom autocomplete field.
+  $vr_id = $form_state_values['vr_variety'];
+  if (!empty($vr_id)) {
+    $term = Term::load($vr_id);
+    $form_state->setValue('title', $term->getName());
+    $form_state->setValue('field_vr_variety', $vr_id);
+
+    // Validation for Duplicate content.
+    $conn = Database::getConnection();
+    $query = $conn->select('node__field_vr_variety', 'vr');
+    $query->fields('vr', ['entity_id']);
+    $query->condition('field_vr_variety_target_id', $vr_id);
+    $result = $query->execute()->fetchAll();
+    if (($build_info->getOperation() == 'edit' && count($result) > 1) || ($build_info->getOperation() == 'default' && count($result) > 0)) {
+      $form_state->setErrorByName('vr_variety', t('Please select another name , Name <b>@term</b> already exists.', ['@term' => $term->getName()]));
+    }
+
+    // Validation for Commodity Term selection.
+    $storage = \Drupal::service('entity_type.manager')->getStorage('taxonomy_term');
+    $variety_parents = array_keys($storage->loadParents($vr_id));
+    foreach ($form_state_values['field_vr_fc_commodity'] as $cm_index => $cm_item) {
+      if (is_numeric($cm_index)) {
+        if (!empty($cm_item['field_fc_commodity'][0]['target_id'])) {
+          // Validate if selected commodity term is linked to the given variety.
+          if (!in_array($cm_item['field_fc_commodity'][0]['target_id'], $variety_parents)) {
+            $form_state->setErrorByName('field_vr_fc_commodity][' . $cm_index . '][field_fc_commodity', t('Please select the Commodity that is associated with "!term"', ['!term' => $term->getName()]));
+          }
+        }
+      }
+    }
+  }
+  else {
+    $form_state->setErrorByName('vr_variety', t('Please Select From Available Commodity'));
+  }
+}
+
+/**
+ * @param $string
+ *   Type of terms required.
+ * @return array
+ *   Returns all the terms of specified type.
+ */
+function redbook_pcl_custom_get_terms($string) {
+  $terms = \Drupal::entityTypeManager()
+      ->getStorage('taxonomy_term')
+      ->loadTree('produce_category_vocabulary', 0, NULL, TRUE);
+  $final_terms = ['- Select a value -'];
+  foreach ($terms as $term_index => $term) {
+    switch ($string) {
+      case 'produce_category':
+        if ($term->field_depth->value == 0) {
+          $final_terms[$term->id()] = $term->getName();
+        }
+        break;
+
+      case 'commodity':
+        if ($term->field_depth->value == 1) {
+          $final_terms[$term->id()] = $term->getName();
+        }
+        break;
+
+      case 'variety':
+        if ($term->field_depth->value == 2) {
+          $final_terms[$term->id()] = $term->getName();
+        }
+        break;
+
+      case '':
+        $final_terms[$term->id()] = $term->getName();
+    }
+  }
+  ksort($final_terms);
+  return $final_terms;
+}
+
+/**
+ * Altering contact form autoreply mail to remove Bracket[] from subject.
+ *
+ * @param $message
+ */
+function redbook_pcl_custom_mail_alter(&$message) {
+  if ($message['id'] == 'contact_page_mail' && $message['params']['contact_form']->get('id') == 'i_wanna_play') {
+    $message['headers']['Content-Type'] = SWIFTMAILER_FORMAT_HTML;
+    $message['from'] = $message['headers']['From'] = '"Produce Market Guide" <' . $message['from'] . '>';
+    $message['subject'] = '<h3>New subscription</h3>';
+    $contactMessage = $message['params']['contact_message'];
+    $text[] = $contactMessage->get('mail')->getString();
+    $message['body'] = array_map(function ($text) {
+      return Markup::create($text);
+    }, $text);
+  }
+
+  if ($message['id'] == 'contact_page_autoreply' && $message['params']['contact_form']->get('id') == 'i_wanna_play') {
+    global $base_url;
+    $message['from'] = '"Produce Market Guide" <' . $message['from'] . '>';
+    $string = substr($message['subject'], 1, -2);
+    $message['headers']['Content-Type'] = SWIFTMAILER_FORMAT_HTML;
+    $contactMessage = $message['params']['contact_message'];
+    $email = $contactMessage->get('mail')->getString();
+    $encode_email = base64_encode($email);
+    $message['subject'] = '<h3>' . $string . '</h3>';
+    $text[] = '<html><head>
+<meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title></title>
+
+<style type="text/css">@media only screen and (max-width:480px){body,table,td,p,a,li,blockquote{-webkit-text-size-adjust:none !important}body{width:100% !important;min-width:100% !important}td[id=bodyCell]{padding:10px !important}table.kmMobileHide{display:none !important}table[class=kmTextContentContainer]{width:100% !important}table[class=kmBoxedTextContentContainer]{width:100% !important}td[class=kmImageContent]{padding-left:0 !important;padding-right:0 !important}img[class=kmImage]{width:100% !important}td.kmMobileStretch{padding-left:0 !important;padding-right:0 !important}table[class=kmSplitContentLeftContentContainer],table[class=kmSplitContentRightContentContainer],table[class=kmColumnContainer],td[class=kmVerticalButtonBarContentOuter] table[class=kmButtonBarContent],td[class=kmVerticalButtonCollectionContentOuter] table[class=kmButtonCollectionContent],table[class=kmVerticalButton],table[class=kmVerticalButtonContent]{width:100% !important}td[class=kmButtonCollectionInner]{padding-left:9px !important;padding-right:9px !important;padding-top:9px !important;padding-bottom:0 !important;background-color:transparent !important}td[class=kmVerticalButtonIconContent],td[class=kmVerticalButtonTextContent],td[class=kmVerticalButtonContentOuter]{padding-left:0 !important;padding-right:0 !important;padding-bottom:9px !important}table[class=kmSplitContentLeftContentContainer] td[class=kmTextContent],table[class=kmSplitContentRightContentContainer] td[class=kmTextContent],table[class=kmColumnContainer] td[class=kmTextContent],table[class=kmSplitContentLeftContentContainer] td[class=kmImageContent],table[class=kmSplitContentRightContentContainer] td[class=kmImageContent]{padding-top:9px !important}td[class="rowContainer kmFloatLeft"],td.rowContainer.kmFloatLeft,td[class="rowContainer kmFloatLeft firstColumn"],td.rowContainer.kmFloatLeft.firstColumn,td[class="rowContainer kmFloatLeft lastColumn"],td.rowContainer.kmFloatLeft.lastColumn{float:left;clear:both;width:100% !important}table[class=templateContainer],table[class="templateContainer brandingContainer"],table[class=templateRow]{max-width:600px !important;width:100% !important}h1{font-size:40px !important;line-height:130% !important}h2{font-size:32px !important;line-height:130% !important}h3{font-size:24px !important;line-height:130% !important}h4{font-size:18px !important;line-height:130% !important}td[class=kmTextContent]{font-size:14px !important;line-height:130% !important}td[class=kmTextBlockInner] td[class=kmTextContent]{padding-right:18px !important;padding-left:18px !important}table[class="kmTableBlock kmTableMobile"] td[class=kmTableBlockInner]{padding-left:9px !important;padding-right:9px !important}table[class="kmTableBlock kmTableMobile"] td[class=kmTableBlockInner] [class=kmTextContent]{font-size:14px !important;line-height:130% !important;padding-left:4px !important;padding-right:4px !important}}</style>
+</head>
+<body style="margin:0;padding:0;background-color:#eee">
+<center>
+<table align="center" border="0" cellpadding="0" cellspacing="0" id="bodyTable" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;padding:0;background-color:#eee;height:100%;margin:0;width:100%">
+<tbody>
+<tr>
+<td align="center" id="bodyCell" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;padding-top:50px;padding-left:20px;padding-bottom:20px;padding-right:20px;border-top:0;height:100%;margin:0;width:100%">
+<table border="0" cellpadding="0" cellspacing="0" class="templateContainer" width="600" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;border:0 none #aaa;background-color:#fff;border-radius:0">
+<tbody>
+<tr>
+<td class="templateContainerInner" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;padding:0">
+<table border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody><tr>
+<td align="center" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<table border="0" cellpadding="0" cellspacing="0" class="templateRow" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody>
+<tr>
+<td class="rowContainer kmFloatLeft" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<table border="0" cellpadding="0" cellspacing="0" class="kmTableBlock kmTableMobile" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;background-color: #ff3131;/* color: #ffffff; */">
+<tbody class="kmTableBlockOuter">
+<tr>
+<td class="kmTableBlockInner" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;padding-top:9px;padding-bottom:9px;padding-left:18px;padding-right:18px;/* color: #ffffff; */">
+<table align="left" border="0" cellpadding="0" cellspacing="0" class="kmTable" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;">
+
+<tbody>
+<tr class="kmTableRow">
+<td valign="top" class="kmTextContent" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;color: #ffffff;font-family: &quot;Helvetica Neue&quot;, Arial;font-size:14px;line-height:130%;text-align:left;border-right:none;border-bottom:none;text-align:left;/* border-top-style:solid; */padding-bottom:4px;padding-right:0px;padding-left:0px;padding-top:4px;/* border-top-color:#d9d9d9; *//* border-top-width:1px; */">
+<span style="font-size:36px;">Produce Market Guide</span><br>
+<span style="font-size:14px;">a product of The Packer</span>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+<table border="0" cellpadding="0" cellspacing="0" class="kmTextBlock" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody class="kmTextBlockOuter">
+<tr>
+<td class="kmTextBlockInner" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;">
+<table align="left" border="0" cellpadding="0" cellspacing="0" class="kmTextContentContainer" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody>
+<tr>
+<td class="kmTextContent" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;color:#222;font-family:&quot;Helvetica Neue&quot;, Arial;font-size:14px;line-height:130%;text-align:left;padding-top:9px;padding-bottom:9px;padding-left:18px;padding-right:18px;">
+<p>Hi!</p>
+
+<p>Thanks for signing up to stay in the loop on the latest announcements about new features and content from THE source in produce information. We&#39;ll keep you fresh on all the new services we&#39;re launching on <a href = "www.producemarketguide.com"><strong>ProduceMarketGuide.com</strong></a>
+
+<p>-- The Produce Market Guide Team</p>
+
+          </td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+<tr>
+<td align="center" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<table border="0" cellpadding="0" cellspacing="0" class="templateRow" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody>
+<tr>
+<td class="rowContainer kmFloatLeft" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<table border="0" cellpadding="0" cellspacing="0" class="kmTextBlock" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody class="kmTextBlockOuter">
+<tr>
+<td class="kmTextBlockInner" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;">
+<table align="left" border="0" cellpadding="0" cellspacing="0" class="kmTextContentContainer" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody>
+<tr>
+<td class="kmTextContent" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;color:#222;font-family:&quot;Helvetica Neue&quot;, Arial;font-size:14px;line-height:130%;text-align:left;font-size:12px;color:#727272;padding-bottom:9px;text-align:center;padding-right:18px;padding-left:18px;padding-top:9px;">
+   © Copyright 2016, The Packer. All Rights Reserved. <a href=' . $base_url . '/privacy-policy style="word-wrap:break-word;color:#15C;font-weight:normal;text-decoration:underline" target="_blank"><strong>Privacy Policy</strong></a> |&nbsp;<a href=' . $base_url . '/terms-of-use style="word-wrap:break-word;color:#15C;font-weight:normal;text-decoration:underline" target="_blank"><strong>Terms of Use</strong></a>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+<table border="0" cellpadding="0" cellspacing="0" class="kmTextBlock" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody class="kmTextBlockOuter">
+<tr>
+<td class="kmTextBlockInner" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;">
+<table align="left" border="0" cellpadding="0" cellspacing="0" class="kmTextContentContainer" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody>
+<tr>
+<td class="kmTextContent" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;color:#222;font-family:&quot;Helvetica Neue&quot;, Arial;font-size:14px;line-height:130%;text-align:left;font-size:12px;color:#727272;padding-bottom:9px;text-align:center;padding-right:18px;padding-left:18px;padding-top:9px;">
+            No longer want to receive these emails? You can <a href=' . $base_url . '/unsubscribe/i_wanna_play/' . $encode_email . ' style="word-wrap:break-word;color:#15C;font-weight:normal;text-decoration:underline" target="_blank"><strong>Unsubscribe</strong></a> <br>
+<p>Farm Journal Media, 10901 W<br>
+ 84th Terrace, Lenexa, KS, 66214, <br>
+Phone: 913-438-8700 </p>
+          </td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody></table>
+</td>
+</tr>
+</tbody>
+</table>
+
+</td>
+</tr>
+</tbody>
+</table>
+</center>
+
+</body></html>';
+    $message['body'] = array_map(function ($text) {
+      return Markup::create($text);
+    }, $text);
+  }
+  if ($message['id'] == 'contact_page_mail' && $message['params']['contact_form']->get('id') == 'feedback') {
+    $message['headers']['Content-Type'] = SWIFTMAILER_FORMAT_HTML;
+    $message['from'] = $message['headers']['From'] = '"Produce Market Guide" <' . $message['from'] . '>';
+    $contactMessage = $message['params']['contact_message'];
+    $senders_name = $contactMessage->get('name')->getString();
+    $senders_email = $contactMessage->get('mail')->getString();
+    $topic = $contactMessage->get('field_contact_form_topic')->getString();
+    $phone_number = $contactMessage->get('field_phone_number')->getString();
+    $value = $contactMessage->get('message')->getString();
+
+    $text[] = '<html><head>
+<meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title></title>
+
+<style type="text/css">@media only screen and (max-width:480px){body,table,td,p,a,li,blockquote{-webkit-text-size-adjust:none !important}body{width:100% !important;min-width:100% !important}td[id=bodyCell]{padding:10px !important}table.kmMobileHide{display:none !important}table[class=kmTextContentContainer]{width:100% !important}table[class=kmBoxedTextContentContainer]{width:100% !important}td[class=kmImageContent]{padding-left:0 !important;padding-right:0 !important}img[class=kmImage]{width:100% !important}td.kmMobileStretch{padding-left:0 !important;padding-right:0 !important}table[class=kmSplitContentLeftContentContainer],table[class=kmSplitContentRightContentContainer],table[class=kmColumnContainer],td[class=kmVerticalButtonBarContentOuter] table[class=kmButtonBarContent],td[class=kmVerticalButtonCollectionContentOuter] table[class=kmButtonCollectionContent],table[class=kmVerticalButton],table[class=kmVerticalButtonContent]{width:100% !important}td[class=kmButtonCollectionInner]{padding-left:9px !important;padding-right:9px !important;padding-top:9px !important;padding-bottom:0 !important;background-color:transparent !important}td[class=kmVerticalButtonIconContent],td[class=kmVerticalButtonTextContent],td[class=kmVerticalButtonContentOuter]{padding-left:0 !important;padding-right:0 !important;padding-bottom:9px !important}table[class=kmSplitContentLeftContentContainer] td[class=kmTextContent],table[class=kmSplitContentRightContentContainer] td[class=kmTextContent],table[class=kmColumnContainer] td[class=kmTextContent],table[class=kmSplitContentLeftContentContainer] td[class=kmImageContent],table[class=kmSplitContentRightContentContainer] td[class=kmImageContent]{padding-top:9px !important}td[class="rowContainer kmFloatLeft"],td.rowContainer.kmFloatLeft,td[class="rowContainer kmFloatLeft firstColumn"],td.rowContainer.kmFloatLeft.firstColumn,td[class="rowContainer kmFloatLeft lastColumn"],td.rowContainer.kmFloatLeft.lastColumn{float:left;clear:both;width:100% !important}table[class=templateContainer],table[class="templateContainer brandingContainer"],table[class=templateRow]{max-width:600px !important;width:100% !important}h1{font-size:40px !important;line-height:130% !important}h2{font-size:32px !important;line-height:130% !important}h3{font-size:24px !important;line-height:130% !important}h4{font-size:18px !important;line-height:130% !important}td[class=kmTextContent]{font-size:14px !important;line-height:130% !important}td[class=kmTextBlockInner] td[class=kmTextContent]{padding-right:18px !important;padding-left:18px !important}table[class="kmTableBlock kmTableMobile"] td[class=kmTableBlockInner]{padding-left:9px !important;padding-right:9px !important}table[class="kmTableBlock kmTableMobile"] td[class=kmTableBlockInner] [class=kmTextContent]{font-size:14px !important;line-height:130% !important;padding-left:4px !important;padding-right:4px !important}}</style>
+</head>
+<body style="margin:0;padding:0;background-color:#eee">
+<center>
+<table align="center" border="0" cellpadding="0" cellspacing="0" id="bodyTable" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;padding:0;background-color:#eee;height:100%;margin:0;width:100%">
+<tbody>
+<tr>
+<td align="center" id="bodyCell" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;padding-top:50px;padding-left:20px;padding-bottom:20px;padding-right:20px;border-top:0;height:100%;margin:0;width:100%">
+<table border="0" cellpadding="0" cellspacing="0" class="templateContainer" width="600" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;border:0 none #aaa;background-color:#fff;border-radius:0">
+<tbody>
+<tr>
+<td class="templateContainerInner" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;padding:0">
+<table border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody><tr>
+<td align="center" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<table border="0" cellpadding="0" cellspacing="0" class="templateRow" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody>
+<tr>
+<td class="rowContainer kmFloatLeft" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<table border="0" cellpadding="0" cellspacing="0" class="kmTableBlock kmTableMobile" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;background-color: #ff3131;/* color: #ffffff; */">
+<tbody class="kmTableBlockOuter">
+<tr>
+<td class="kmTableBlockInner" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;padding-top:9px;padding-bottom:9px;padding-left:18px;padding-right:18px;/* color: #ffffff; */">
+<table align="left" border="0" cellpadding="0" cellspacing="0" class="kmTable" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;">
+
+<tbody>
+<tr class="kmTableRow">
+<td valign="top" class="kmTextContent" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;color: #ffffff;font-family: &quot;Helvetica Neue&quot;, Arial;font-size:14px;line-height:130%;text-align:left;border-right:none;border-bottom:none;text-align:left;/* border-top-style:solid; */padding-bottom:4px;padding-right:0px;padding-left:0px;padding-top:4px;/* border-top-color:#d9d9d9; *//* border-top-width:1px; */">
+<span style="font-size:36px;">Produce Market Guide</span><br>
+<span style="font-size:14px;">a product of The Packer</span>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+<table border="0" cellpadding="0" cellspacing="0" class="kmTextBlock" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody class="kmTextBlockOuter">
+<tr>
+<td class="kmTextBlockInner" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;">
+<table align="left" border="0" cellpadding="0" cellspacing="0" class="kmTextContentContainer" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody>
+<tr>
+<td class="kmTextContent" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;color:#222;font-family:&quot;Helvetica Neue&quot;, Arial;font-size:14px;line-height:130%;text-align:left;padding-top:9px;padding-bottom:9px;padding-left:18px;padding-right:18px;">
+            <h3>Senders name</h3><p>' . $senders_name . '</p>
+            <h3>Senders email</h3><p>' . $senders_email . '</p>
+              <h3>Phone Number</h3><p>' . $phone_number . '</p>
+                <h3>Topic</h3><p>' . $topic . '</p>
+                  <h3>Message</h3><p>' . $value . '</p>
+          </td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+<table border="0" cellpadding="0" cellspacing="0" class="kmTableBlock kmTableMobile" width="100%" style="border-collapse:collapse;mso-table-lspace:0;background-color: #ff3131;mso-table-rspace:0;">
+<tbody class="kmTableBlockOuter">
+<tr>
+<td class="kmTableBlockInner" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;padding-top:9px;padding-bottom:9px;padding-left:18px;padding-right:18px;">
+<table align="left" border="0" cellpadding="0" cellspacing="0" class="kmTable" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;">
+
+<tbody>
+<tr class="kmTableRow">
+<td valign="top" class="kmTextContent" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;color:#222;font-family:&quot;Helvetica Neue&quot;, Arial;font-size:14px;line-height:130%;text-align:left;border-right:none;border-bottom:none;text-align:left;/* border-top-style:solid; */padding-bottom:4px;padding-right:0px;padding-left:0px;padding-top:4px;/* border-top-color:#d9d9d9; *//* border-top-width:1px; */">
+<table style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody>
+<tr style="
+    font-size: 14px;
+">
+<td style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;color: #fff;line-height: 1.5;width: 33.33%;padding-right: 15px;" valign="top">
+<h3 style="/* color: #fff; */display:block;font-family:&quot;Helvetica Neue&quot;, Arial;font-size:24px;font-style:normal;font-weight:bold;line-height:110%;letter-spacing:normal;margin:0;margin-bottom:12px;text-align:left;">About PMG</h3>
+			The Produce Market Guide is a resource for produce commodity information, fresh trends and data analysis. PMG is a product of The Packer, the fresh fruit and vegetable industrys leading source for news, information and analysis.</td>
+<td style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;color: #fff;width: 33.33%;padding-right: 10px;" valign="top">
+<h3 style="/* color: #fff; */display:block;font-family:&quot;Helvetica Neue&quot;, Arial;font-size:24px;font-style:normal;font-weight:bold;line-height:110%;letter-spacing:normal;margin:0;margin-bottom:12px;text-align:left;">The Packer</h3>
+<p style="margin:0;padding-bottom:1em"><strong>Farm Journal Media</strong></p>
+<p style="margin:0;padding-bottom:1em">8725 Rosehill Rd, Ste 200</p>
+<p style="margin:0;padding-bottom:1em">Lenexa, KS, 66215</p>
+<p style="margin:0;padding-bottom:1em">Phone: 913-438-0621</p>
+<p style="margin:0;padding-bottom:1em">Website: <a href="http://www.thepacker.com" style="word-wrap:break-word;color: #fff;font-weight:normal;text-decoration: none;" target="_blank">www.thepacker.com</a></p>
+<p style="margin:0;padding-bottom:0">Website: <a href="http://www.produceretailer.com" style="word-wrap:break-word;color: #fff;font-weight:normal;text-decoration: none;" target="_blank">www.produceretailer.com</a></p>
+</td>
+<td style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;color: #fff;width: 31%;" valign="top">
+<h3 style="/* color: #fff; */display:block;font-family:&quot;Helvetica Neue&quot;, Arial;font-size:24px;font-style:normal;font-weight:bold;line-height:110%;letter-spacing:normal;margin:0;margin-bottom:12px;text-align:left;">Sales</h3>
+<p style="margin:0;padding-bottom:1em"><strong>Angelo Grant</strong>, Sales Manager</p>
+<p style="margin:0;padding-bottom:1em">Phone: 913-438-0746</p>
+<p style="margin:0;padding-bottom:1em">Email: agrant@thepacker.com</p>
+<p style="margin:0;padding-bottom:1em"><strong>David Starr</strong>, Sales Representative</p>
+<p style="margin:0;padding-bottom:1em">Phone: 913-438-0740</p>
+<p style="margin:0;padding-bottom:1em">Email:  dstarr@thepacker.com</p>
+<p style="margin:0;padding-bottom:1em"><strong>Aaron Howard</strong>, Sales Representative</p>
+<p style="margin:0;padding-bottom:1em">Phone: 913-438-0615</p>
+<p style="margin:0;padding-bottom:0">Email: ahoward@thepacker.com</p>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+<tr>
+<td align="center" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<table border="0" cellpadding="0" cellspacing="0" class="templateRow" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody>
+<tr>
+<td class="rowContainer kmFloatLeft" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<table border="0" cellpadding="0" cellspacing="0" class="kmTextBlock" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody class="kmTextBlockOuter">
+<tr>
+<td class="kmTextBlockInner" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;">
+<table align="left" border="0" cellpadding="0" cellspacing="0" class="kmTextContentContainer" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody>
+<tr>
+<td class="kmTextContent" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;color:#222;font-family:&quot;Helvetica Neue&quot;, Arial;font-size:14px;line-height:130%;text-align:left;font-size:12px;color:#727272;padding-bottom:9px;text-align:center;padding-right:18px;padding-left:18px;padding-top:9px;">
+            © Copyright 2018, The Packer. All Rights Reserved. <a href="%7B%7B%20privacy_policy_link%20%7D%7D" style="word-wrap:break-word;color:#15C;font-weight:normal;text-decoration:underline" target="_blank"><strong>Privacy Policy</strong></a> |&nbsp;<a href="%7B%7B%20terms_of_use_link%20%7D%7D" style="word-wrap:break-word;color:#15C;font-weight:normal;text-decoration:underline" target="_blank"><strong>Terms of Use</strong></a>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+<table border="0" cellpadding="0" cellspacing="0" class="kmTextBlock" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody class="kmTextBlockOuter">
+<tr>
+<td class="kmTextBlockInner" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;">
+<table align="left" border="0" cellpadding="0" cellspacing="0" class="kmTextContentContainer" width="100%" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0">
+<tbody>
+<tr>
+<td class="kmTextContent" valign="top" style="border-collapse:collapse;mso-table-lspace:0;mso-table-rspace:0;color:#222;font-family:&quot;Helvetica Neue&quot;, Arial;font-size:14px;line-height:130%;text-align:left;font-size:12px;color:#727272;padding-bottom:9px;text-align:center;padding-right:18px;padding-left:18px;padding-top:9px;">
+            No longer want to receive these emails? You can {% unsubscribe unsubscribe here %}.<br>
+{{ organization.name }} {{ organization.full_address }}
+          </td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody></table>
+</td>
+</tr>
+</tbody>
+</table>
+
+</td>
+</tr>
+</tbody>
+</table>
+</center>
+
+</body></html>';
+    $message['subject'] = $message['subject'];
+    $message['body'] = array_map(function ($text) {
+      return Markup::create($text);
+    }, $text);
+  }
+}
+
+/**
+ * Filtering Duplicate data related to freshtrends page and produce index page.
+ *
+ * @param \Drupal\views\ViewExecutable $view
+ */
+function redbook_pcl_custom_views_pre_render(ViewExecutable $view) {
+
+  // For the unclaimed companies claimed by should be empty as per the PMGR2-1331.
+  if ($view->id() == 'endorsement' && $view->current_display == 'page_1') {
+    foreach ($view->result as $value) {
+      if ($value->_entity->get('owner_uid')->target_id == '1') {
+        $value->_entity->set('owner_uid', NULL);
+      }
+    }
+  }
+
+  // Unset view result row if diff changes is empty on latest company changes view.
+  if ($view->id() == 'company_recent_changes' && $view->current_display == 'company_recent_changes_display') {
+    foreach ($view->result as $value) {
+      if (isset($value->_relationship_entities['cl_company']) && !empty($value->_relationship_entities['cl_company'])) {
+        if (is_numeric($value->_relationship_entities['cl_company']->get('field_comp_membership_type')->target_id)) {
+          $enhanced_package_id = $enhanced_start_date = $enhanced_end_date = $valid_enhanced_date = '';
+          $company_nid = $value->_relationship_entities['cl_company']->id();
+          $node = Node::load($company_nid);
+          $enhanced_package_id = $node->get('field_comp_membership_type')->target_id;
+          $enhanced_start_date = $node->get('field_membership_start_date')->value;
+          $enhanced_end_date = $node->get('field_membership_end_date')->value;
+          $valid_enhanced_date = _is_valid_date($enhanced_start_date, $enhanced_end_date);
+          // Displaying empty for non active membership package in the admin-dashboard page.
+          if (!empty($enhanced_package_id) && !$valid_enhanced_date) {
+            $value->_relationship_entities['cl_company']->set('field_comp_membership_type', NULL);
+          }
+        }
+      }
+      if ($value->_entity->get('user_id')->target_id == 0) {
+        $value->_entity->set('user_id', NULL);
+      }
+    }
+  }
+
+  // Frends Trends Page Filter.
+  if ($view->id() == 'fresh_trend_page' && $view->current_display == 'block_2') {
+    $tmp = [];
+    foreach ($view->result as $key => $viewResult) {
+
+      if (in_array($viewResult->taxonomy_term_field_data_field_collection_item__field_fc_pro, $tmp)) {
+        unset($view->result[$key]);
+      }
+      else {
+        $tmp[] = $viewResult->taxonomy_term_field_data_field_collection_item__field_fc_pro;
+      }
+    }
+  }
+  // Produce Index Page Filter.
+  if ($view->id() == 'fresh_trend_page' && $view->current_display == 'block_1') {
+    $tmp = [];
+    foreach ($view->result as $key => $viewResult) {
+      if (in_array($viewResult->taxonomy_term_field_data_field_collection_item__field_fc_pro, $tmp)) {
+        unset($view->result[$key]);
+      }
+      else {
+        $tmp[] = $viewResult->taxonomy_term_field_data_field_collection_item__field_fc_pro;
+      }
+    }
+  }
+  if ($view->id() == 'commodity_data' && $view->current_display == 'block_varieties') {
+    $node = \Drupal::routeMatch()->getParameter('node');
+    if (!empty($node)) {
+      $variety_message = $node->get('field_cm_variety_message')->value;
+      if (!empty($variety_message)) {
+        $view->empty['area']->options['content']['value'] = $variety_message;
+        $view->empty['area']->options['content']['format'] = $node->get('field_cm_variety_message')->format;
+      }
+    }
+  }
+  /*  if ($view->id() == 'content_moderation_list' && $view->current_display == 'page_1') {
+    foreach ($view->result as $key => $value) {
+    $node = \Drupal\node\Entity\Node::load($value->node_field_data_node_field_revision_nid);
+    $diff = \Drupal::service('rb_moderation.diff');
+    if ($node) {
+    $diffArray = $diff->getRecentPublishedChanges($node);
+    if (empty($diffArray)) {
+    $diffArray = $diff->getNewPublishedChanges($node);
+    }
+    }
+    if (!empty($diffArray)) {
+    unset($view->result[$key]);
+    }
+    }
+    } */
+}
+
+/**
+ *
+ */
+function redbook_pcl_custom_block_access(Block $block, $operation, AccountInterface $account) {
+  $node = \Drupal::routeMatch()->getParameter('node');
+  $node = is_string($node) ? Node::load($node) : $node;
+  if (!empty($node)) {
+    $node_id = $node->id();
+  }
+  else {
+    $node_id = '';
+  }
+  if ($block->getPluginId() == 'redbook_pcl_category_list') {
+    return AccessResult::forbiddenIf(!empty($node_id));
+  }
+}
+
+/**
+ * Function to update lat/long values on change of address, title,
+ * exclude company name in maps fields. Lat/long values are used to show
+ * the static maps in company page.
+ */
+function redbook_pcl_custom_node_update_lat_long(&$form, FormStateInterface $form_state) {
+  $update_lat_long = FALSE;
+  $form_state_complete_form = $form_state->getCompleteForm();
+  $address_value = $form_state_complete_form['field_comp_address']['widget']['0']['address'];
+  // Company Create.
+  if ($form['#form_id'] == 'node_company_form') {
+    $title = $form_state_complete_form['title']['widget']['0']['value']['#value'];
+    $update_lat_long = TRUE;
+    // Update the lat, long if address is present.
+    if (!empty($address_value['#value']['country_code'])) {
+      $address_string = NULL;
+      $address_string = isset($address_value['#value']['address_line1']) ? $address_string . $address_value['#value']['address_line1'] : '';
+      $address_string = isset($address_value['#value']['address_line2']) ? $address_string . ', ' . $address_value['#value']['address_line2'] : '';
+      $address_string = isset($address_value['#value']['locality']) ? $address_string . ', ' . $address_value['#value']['locality'] : '';
+      $address_string = isset($address_value['#value']['administrative_area']) ? $address_string . ', ' . $address_value['#value']['administrative_area'] : '';
+      $address_string = isset($address_value['#value']['postal_code']) ? $address_string . ', ' . $address_value['#value']['postal_code'] : '';
+      $address_string = isset($address_value['#value']['country_code']) ? $address_string . ', ' . $address_value['#value']['country_code'] : '';
+
+      if (!isset($form_state_complete_form['field_comp_gmap_name']['widget']['value']['#value'])) {
+        $address_string = urlencode($title) . ', ' . $address_string;
+      }
+    }
+  }
+  // Company Update.
+  if ($form['#form_id'] == 'node_company_edit_form' || $form['#form_id'] == 'node_company_business_user_company_edit_form') {
+    // Update the lat, long only if there is change in Address, title,
+    //   Exclude company name fields.
+    // Perform update only if address field has value.
+    if (!empty($address_value['#default_value']['country_code']) || !empty($address_value['#value']['country_code'])) {
+      $address_string = NULL;
+      $address_string = isset($address_value['#default_value']['address_line1']) ? $address_string . $address_value['#default_value']['address_line1'] : '';
+      $address_string = isset($address_value['#default_value']['address_line2']) ? $address_string . ', ' . $address_value['#default_value']['address_line2'] : '';
+      $address_string = isset($address_value['#default_value']['locality']) ? $address_string . ', ' . $address_value['#default_value']['locality'] : '';
+      $address_string = isset($address_value['#default_value']['administrative_area']) ? $address_string . ', ' . $address_value['#default_value']['administrative_area'] : '';
+      $address_string = isset($address_value['#default_value']['postal_code']) ? $address_string . ', ' . $address_value['#default_value']['postal_code'] : '';
+      $address_string = isset($address_value['#default_value']['country_code']) ? $address_string . ', ' . $address_value['#default_value']['country_code'] : '';
+
+      // If the address is removed, set to null values.
+      if (!empty($address_value['#default_value']['country_code']) && empty($address_value['#value']['country_code'])) {
+        $removed_address = TRUE;
+      }
+      // Check for address field change.
+      else {
+        if ($address_value['#default_value']['country_code'] != $address_value['#value']['country_code'] || $address_value['#default_value']['administrative_area'] != $address_value['#value']['administrative_area'] || $address_value['#default_value']['locality'] != $address_value['#value']['locality'] || $address_value['#default_value']['dependent_locality'] != $address_value['#value']['dependent_locality'] || $address_value['#default_value']['postal_code'] != $address_value['#value']['postal_code'] || $address_value['#default_value']['sorting_code'] != $address_value['#value']['sorting_code'] || $address_value['#default_value']['address_line1'] != $address_value['#value']['address_line1'] || $address_value['#default_value']['address_line2'] != $address_value['#value']['address_line2'] || $address_value['#default_value']['organization'] != $address_value['#value']['organization'] || $address_value['#default_value']['given_name'] != $address_value['#value']['given_name'] || $address_value['#default_value']['additional_name'] != $address_value['#value']['additional_name'] || $address_value['#default_value']['family_name'] != $address_value['#value']['family_name']
+        ) {
+          $update_lat_long = TRUE;
+
+          $address_string = NULL;
+          $address_string = isset($address_value['#value']['address_line1']) ? $address_string . $address_value['#value']['address_line1'] : '';
+          $address_string = isset($address_value['#value']['address_line2']) ? $address_string . ', ' . $address_value['#value']['address_line2'] : '';
+          $address_string = isset($address_value['#value']['locality']) ? $address_string . ', ' . $address_value['#value']['locality'] : '';
+          $address_string = isset($address_value['#value']['administrative_area']) ? $address_string . ', ' . $address_value['#value']['administrative_area'] : '';
+          $address_string = isset($address_value['#value']['postal_code']) ? $address_string . ', ' . $address_value['#value']['postal_code'] : '';
+          $address_string = isset($address_value['#value']['country_code']) ? $address_string . ', ' . $address_value['#value']['country_code'] : '';
+        }
+      }
+    }
+  }
+  if ($form_state_complete_form['field_comp_gmap_name']['widget']['value']['#default_value'] != $form_state_complete_form['field_comp_gmap_name']['widget']['value']['#value']) {
+    $exclude_title_in_gmap = $form_state_complete_form['field_comp_gmap_name']['widget']['value']['#value'];
+    $update_lat_long = TRUE;
+  }
+  elseif ($form['#form_id'] == 'node_company_business_user_company_edit_form') {
+    $entity = $form_state->getFormObject()->getEntity();
+    $exclude_title_in_gmap = $entity->get('field_comp_gmap_name')->value;
+  }
+  else {
+    $exclude_title_in_gmap = $form_state_complete_form['field_comp_gmap_name']['widget']['value']['#default_value'];
+  }
+  if ($form_state_complete_form['title']['widget']['0']['value']['#default_value'] != $form_state_complete_form['title']['widget']['0']['value']['#value']) {
+    $title = $form_state_complete_form['title']['widget']['0']['value']['#value'];
+    $update_lat_long = TRUE;
+  }
+  else {
+    $title = $form_state_complete_form['title']['widget']['0']['value']['#default_value'];
+  }
+  // Adding the Company name in address.
+  if ($exclude_title_in_gmap == FALSE) {
+    $address_string = urlencode($title) . ', ' . $address_string;
+  }
+
+  if (isset($removed_address) && $removed_address) {
+    $map_source[0]['value'] = 'address';
+    $map_value[0]['value'] = $title;
+    $form_state->setValue('field_comp_latitude', []);
+    $form_state->setValue('field_comp_longitude', []);
+    $form_state->setValue('field_map_source', $map_source);
+    $form_state->setValue('field_comp_map_value', $map_value);
+  }
+  else {
+    if (!empty($address_string) || $update_lat_long) {
+      $address_string = str_replace(' ', '+', $address_string);
+      $response = file_get_contents('https://maps.googleapis.com/maps/api/geocode/json?address=' . $address_string . '&key=AIzaSyD_vksSgomrwdDt6Z7p7QOQyjPueO21tlc');
+      $result = json_decode($response);
+      if ($result->status == 'OK') {
+        $map_source[0]['value'] = 'place_id';
+        $map_value[0]['value'] = $result->results[0]->place_id;
+        $form_state->setValue('field_comp_latitude', [$result->results[0]->geometry->location->lat]);
+        $form_state->setValue('field_comp_longitude', [$result->results[0]->geometry->location->lng]);
+        $form_state->setValue('field_map_source', $map_source);
+        $form_state->setValue('field_comp_map_value', $map_value);
+      }
+      else {
+        $map_source[0]['value'] = 'address';
+        $map_value[0]['value'] = $title;
+        $form_state->setValue('field_comp_latitude', [0]);
+        $form_state->setValue('field_comp_longitude', [0]);
+        $form_state->setValue('field_map_source', $map_source);
+        $form_state->setValue('field_comp_map_value', $map_value);
+      }
+    }
+  }
+}
+
+function redbook_pcl_custom_bluebook_ratinbg_url(&$form, FormStateInterface $form_state) {
+  $input_values = $form_state->getUserInput();
+  if (!empty($input_values['field_blue_book_rating'][0]['value']) && empty($input_values['field_blue_book_rating_url'][0]['uri'])) {
+    $form_state->setErrorByName('field_blue_book_rating_url', t('Blue Book Profile URL is required.'));
+  }
+}
+
+/**
+ * Implements hook_field_widget_form_alter().
+ */
+function redbook_pcl_custom_field_widget_form_alter(&$element, FormStateInterface $form_state, $context) {
+
+}
+
+/**
+ * Implements hook_views_pre_execute().
+ */
+/* Commenting Distance Filters.
+  function redbook_pcl_custom_views_pre_execute(\Drupal\views\ViewExecutable $view) {
+  if ($view->id() == 'produce_companies' && ($view->current_display == 'block_company_commodity')) {
+  $options = array('- None -', '25 miles', '50 miles', '100 miles', '200+ miles');
+
+  $exposed_input = $view->getExposedInput();
+
+  $distance_radius = isset($exposed_input['distance_radius']) ? $exposed_input['distance_radius'] : NULL;
+
+  if (!empty($distance_radius)) {
+  $op = '<=';
+  if ($options[$distance_radius] == '200+ miles') {
+  $op = '>=';
+  }
+  $input = $view->exposed_raw_input;
+  if (!empty($input['latitude']) && !empty($input['longitude'])) {
+  $query = $view->build_info['query'];
+  $query->leftJoin('node__field_comp_latitude', 'node__field_comp_latitude', 'node_field_data.nid = node__field_comp_latitude.entity_id AND (node__field_comp_latitude.deleted = \'0\' AND node__field_comp_latitude.langcode = node_field_data.langcode)');
+  $query->leftJoin('node__field_comp_longitude', 'node__field_comp_longitude', 'node_field_data.nid = node__field_comp_longitude.entity_id AND (node__field_comp_longitude.deleted = \'0\' AND node__field_comp_longitude.langcode = node_field_data.langcode)');
+  $query->where('(3959* acos( cos( RADIANS(:input_lat)) * cos( RADIANS( node__field_comp_latitude.field_comp_latitude_value ) )
+ * cos( RADIANS(:input_long) - RADIANS(node__field_comp_longitude.field_comp_longitude_value) ) + sin( RADIANS(:input_lat) )
+ * sin( RADIANS( node__field_comp_latitude.field_comp_latitude_value ) ) ) ) ' . $op . ' :input_radius', array(
+  ':input_lat' => $input['latitude'],
+  ':input_long' => $input['longitude'],
+  ':input_radius' => str_replace(array('miles', '+ miles'), '', $options[$distance_radius]),
+  ));
+  $query->distinct();
+  $view->build_info['query'] = $query;
+  $view->build_info['count_query'] = $query;
+  }
+  }
+  }
+  } */
+
+/**
+ * Implements hook_views_query_alter().
+ */
+function redbook_pcl_custom_views_query_alter(ViewExecutable $view, QueryPluginBase $query) {
+
+  if ($view->id() == 'financial_snapshot' && ($view->current_display == 'page_2' || $view->current_display == 'page_1')) {
+    $from_date = isset($_GET['from']) ? strtotime($_GET['from']) : '0';
+    $to_date = isset($_GET['to']) ? strtotime($_GET['to']) : '0';
+    $add_day = (23 * 60 * 60) + (59 * 60);
+
+    if ($from_date == $to_date) {
+      $new_to_date = $from_date + $add_day;
+
+      foreach ($query->where[1]['conditions'] as $key => $fields) {
+        if ($fields['field'] == 'financial_snapshot_field_data.changed <= ' . $from_date) {
+          $query->where[1]['conditions'][$key]['field'] = 'financial_snapshot_field_data.changed <= ' . $new_to_date;
+        }
+      }
+    }
+    else {
+      $new_to_date = $to_date + $add_day;
+      foreach ($query->where[1]['conditions'] as $key => $fields) {
+        if ($fields['field'] == 'financial_snapshot_field_data.changed <= ' . $to_date) {
+          $query->where[1]['conditions'][$key]['field'] = 'financial_snapshot_field_data.changed <= ' . $new_to_date;
+        }
+      }
+    }
+  }
+
+  if ($view->id() == 'company_recent_changes' && $view->current_display == 'company_recent_changes_display') {
+    // Adding extra time to get the records inclusive of dates.
+    $from_date = isset($_GET['created']['min']) ? strtotime($_GET['created']['min'], date('dd/mm/yyyy', $_GET['created']['min'])) : '0';
+    $to_date = isset($_GET['created']['max']) ? strtotime($_GET['created']['max'], date('dd/mm/yyyy', $_GET['created']['max'])) : '0';
+    $add_day = (23 * 60 * 60) + (59 * 60);
+
+    $new_to_date = $to_date + $add_day;
+    foreach ($query->where[1]['conditions'] as $key => $fields) {
+      if ($fields['field'] == 'change_log_field_data.created BETWEEN ' . $from_date . ' AND ' . $to_date) {
+        $query->where[1]['conditions'][$key]['field'] = 'change_log_field_data.created BETWEEN ' . $from_date . ' AND ' . $new_to_date;
+      }
+    }
+  }
+
+  if ($view->id() == 'endorsement' && $view->current_display == 'page_1') {
+    $from_date = isset($_GET['from']) ? strtotime($_GET['from']) : '0';
+    $to_date = isset($_GET['to']) ? strtotime($_GET['to']) : '0';
+    $add_day = (23 * 60 * 60) + (59 * 60);
+
+    if ($from_date == $to_date) {
+      $new_to_date = $from_date + $add_day;
+
+      foreach ($query->where[1]['conditions'] as $key => $fields) {
+        if ($fields['field'] == 'entity_endorsement.created <= ' . $from_date) {
+          $query->where[1]['conditions'][$key]['field'] = 'entity_endorsement.created <= ' . $new_to_date;
+        }
+      }
+    }
+    else {
+      $new_to_date = $to_date + $add_day;
+      foreach ($query->where[1]['conditions'] as $key => $fields) {
+        if ($fields['field'] == 'entity_endorsement.created <= ' . $to_date) {
+          $query->where[1]['conditions'][$key]['field'] = 'entity_endorsement.created <= ' . $new_to_date;
+        }
+      }
+    }
+  }
+  // Commenting Distance Filters.
+  /*  if ($view->id() == 'produce_companies' && ($view->current_display == 'block_company_commodity')) {
+    if (!empty($view->exposed_raw_input['latitude']) && !empty($view->exposed_raw_input['longitude'])) {
+    foreach ($query->where as &$condition_group) {
+    foreach ($condition_group['conditions'] as $key => &$condition) {
+    if ($condition['field'] == 'node__field_comp_latitude.field_comp_latitude_value') {
+    unset($condition_group['conditions'][$key]);
+    }
+    if ($condition['field'] == 'node__field_comp_longitude.field_comp_longitude_value') {
+    unset($condition_group['conditions'][$key]);
+    }
+    }
+    }
+    }
+    } */
+
+  if ($view->id() == 'organic_produce_category' && ($view->current_display == 'page_1' || $view->current_display == 'block_1')) {
+
+    $con = Database::getConnection();
+    $qry = $con->select('taxonomy_term_field_data', 'td');
+    $qry->fields('td', ['tid']);
+    $qry->condition('name', 'Organic Produce', '=');
+    $pid = $qry->execute()->fetchField();
+    $query->where[1]['conditions'][1]['value'] = $pid;
+  }
+}
+
+/**
+ * Implements hook_views_pre_view()
+ *
+ * We are evaluating latitute and longitude values using Google Maps Geocoding API
+ * if given is 'distance' and 'distance from'.
+ */
+// Function redbook_pcl_custom_views_pre_view(\Drupal\views\ViewExecutable $view, $display_id, array &$args) {
+/* If ($view->id() == 'produce_companies') {
+
+
+  $hooked_once = &drupal_static(__FUNCTION__);
+
+  if (!isset($hooked_once['view'])) {
+
+  // For State search
+  $array_country = array('US');
+  $state_option = \Drupal::service('address.subdivision_repository')->getList($array_country);
+
+  $exposed_input = $view->getExposedInput();
+  $title_value = $exposed_input['title'];
+  $key = array_search ($title_value, $state_option);
+  if(!empty($key)) {
+  $exposed_input['field_comp_address_administrative_area'] = $key;
+  }
+  //      if(!empty($exposed_input['title'])) {
+  $query = \Drupal::database()->select('taxonomy_term_field_data', 'r');
+  $query->fields('r', ['tid','name','vid']);
+  $query->condition('name', "%" .$title_value."%", 'LIKE');
+  $results = $query->execute();
+  $record = $results->fetchObject();
+
+
+  if($record->tid != '' && $record->vid == 'produce_category_vocabulary' ){
+  $exposed_input['field_comp_commodity_target_id'] = $record->tid;
+  $exposed_input['title'] = '';
+  $exposed_input['field_comp_address_locality'] = '';
+
+  }
+  elseif($record->vid == 'company_profile_type' && $record->tid != '' ){
+  $exposed_input['field_comp_type_target_id'] = $record->tid;
+  $exposed_input['title'] = '';
+  $exposed_input['field_comp_address_locality'] = '';
+
+  }
+  elseif($record->vid == 'operation_type' && $record->tid != ''){
+  $exposed_input['field_comp_legacy_operation_target_id'] = $record->tid;
+  $exposed_input['title'] = '';
+  $exposed_input['field_comp_address_locality'] = '';
+  }
+  else{
+  $exposed_input['field_comp_address_locality'] = $title_value;
+  $exposed_input['field_comp_commodity_target_id'] = 'All';
+  $exposed_input['field_comp_type_target_id'] = 'All';
+  $exposed_input['field_comp_legacy_operation_target_id'] = 'All';
+  } */
+//
+//      }
+//
+//      $distance_from = '';
+//
+//        if (!empty($exposed_input['distance_from_zip'])) {
+//        $distance_from = $exposed_input['distance_from_zip'];
+//      }
+//      // Commenting distance from state in pre render. Verify if it's correct.
+//      /*
+//        else if (!empty($exposed_input['distance_from_state'])) {
+//        $distance_from = str_replace(' ', '+', $exposed_input['distance_from_state']);
+//        }
+//       */
+//
+//      if (!empty($distance_from)) {
+//        // Quota of this api key is exausted hence commenting this line.
+//        // $response = file_get_contents('https://maps.googleapis.com/maps/api/geocode/json?address=' . $distance_from . '&key=AIzaSyD_vksSgomrwdDt6Z7p7QOQyjPueO21tlc');
+//        // Below call is made using api keys of account hanmant@valueboud.com
+//        $response = file_get_contents('https://maps.googleapis.com/maps/api/geocode/json?address=' . $distance_from . '&key=AIzaSyA5sbJaSZDRRhtzTQYBBAivvNJ3iwONIm8');
+//
+//        $result = json_decode($response);
+//
+//        if ($result->status == 'OK') {
+//          $location = isset($result->results[0]->geometry) ? $result->results[0]->geometry : NULL;
+//          $exposed_input['latitude'] = isset($location->location->lat) ? $location->location->lat : '';
+//          $exposed_input['longitude'] = isset($location->location->lat) ? $location->location->lng : '';
+//        }
+//        else {
+//          // We log in case api fails by some reason. more information can be found in log then.
+//          \Drupal::logger('google api error - Maps Geocoding API')->info($response);
+//        }
+//      }
+// $view->setExposedInput($exposed_input);
+// return $hooked_once['view'] = $view;
+// }
+// }
+// }.
+/**
+ * Helper function to get the operation type options.
+ *
+ * @return array
+ */
+function _get_operation_type($node_id) {
+  // $node_id = '4670';
+  // $node = \Drupal::routeMatch()->getParameter('node');
+  //  $node_id = $node->id();
+  $conn = Database::getConnection();
+  $query = $conn->select('node__field_cm_commodity', 'c');
+  $query->join('node__field_comp_commodity', 'comp_c', 'comp_c.field_comp_commodity_target_id = c.field_cm_commodity_target_id');
+  $query->join('node__field_comp_legacy_operation', 'l', 'l.entity_id = comp_c.entity_id');
+  $query->join('taxonomy_term_field_data', 't', 't.tid = l.field_comp_legacy_operation_target_id');
+  $query->fields('l', ['field_comp_legacy_operation_target_id']);
+  $query->fields('t', ['name']);
+  $query->condition('c.entity_id', $node_id);
+  $results = $query->execute()->fetchAll();
+  foreach ($results as $result) {
+    $operation_types[$result->field_comp_legacy_operation_target_id] = $result->name;
+  }
+
+  asort($operation_types);
+
+  $top_option_array = ['1669' => 'Buyer', '1245' => 'Retailer', '1246' => 'Wholesaler', '1242' => 'Grower', '1243' => 'Shipper'];
+  foreach ($top_option_array as $key => $top_option) {
+    if (isset($operation_types[$key])) {
+      unset($operation_types[$key]);
+      $option_at_top['All'] = '- Any -';
+      $option_at_top[$key] = $top_option;
+      $operation_types = $option_at_top + $operation_types;
+    }
+    else {
+      $option_at_top['All'] = '- Any -';
+      if (!empty($operation_types)) {
+        $operation_types = $option_at_top + $operation_types;
+      }
+      else {
+        $operation_types = $option_at_top;
+      }
+    }
+  }
+  return $operation_types;
+}
+
+/**
+ *
+ */
+function redbook_pcl_custom_node_presave(EntityInterface $node) {
+  $image = '';
+  if ($node->get('type')->getValue()[0]['target_id'] == 'produce_category') {
+    $field = 'field_pc_large_feature_image';
+  }
+  if ($node->get('type')->getValue()[0]['target_id'] == 'commodity') {
+    $field = 'field_cm_large_feature_image';
+  }
+  if ($node->get('type')->getValue()[0]['target_id'] == 'variety') {
+    $field = 'field_vr_large_feature_image';
+  }
+  if (!empty($field)) {
+    $image = $node->get($field)->getValue();
+    if (empty($image[0]['target_id'])) {
+      $conn = Database::getConnection();
+      $query = $conn->select('file_managed', 'f');
+      $query->fields('f', ['fid']);
+      $query->condition('filename', 'default_pmg_image.png');
+      $fid = $query->execute()->fetchfield();
+      $node->set($field, $fid);
+    }
+  }
+}
+
+/**
+ * Implements hook_node_update_index.
+ */
+function redbook_pcl_custom_node_update_index(NodeInterface $node) {
+  $state = $country_code = NULL;
+  if ($node->bundle() == 'company') {
+    // Fetch the administrative area value and add that to search index.
+    $state = $node->field_comp_address->administrative_area;
+    $country_code = $node->field_comp_address->country_code;
+    if (!empty($country_code)) {
+      $array_country = [$country_code];
+      // Get the state value.
+      // $state_option = \Drupal::service('address.subdivision_repository')->getList($array_country);
+      $state_option = _redbook_pcl_get_states($array_country);
+      if (isset($state_option[$state])) {
+        $text = $state_option[$state];
+        return $text;
+      }
+    }
+  }
+}
+
+/**
+ *
+ */
+function redbook_pcl_custom_user_insert($account) {
+  $account->status = TRUE;
+  $account->save();
+}
+
+/**
+ * Hook_entity_presave.
+ *
+ * @param Drupal\Core\Entity\EntityInterface $entity
+ */
+function redbook_pcl_custom_entity_presave(EntityInterface $entity) {
+  $primary_op = '';
+  if ($entity->getEntityType()->id() == 'node' && $entity->bundle() == 'contact') {
+    $first_name = $entity->get('field_cont_first_name')->value;
+    $last_name = $entity->get('field_cont_last_name')->value;
+    $title = trim($first_name, ' ') . ' ' . trim($last_name, ' ');
+    $entity->title->setValue($title);
+  }
+  if ($entity->getEntityType()->id() == 'node' && $entity->bundle() == 'license') {
+    $license_type = $entity->get('field_lic_type')->value;
+    $license_number = $entity->get('field_lic_number')->value;
+    $license_title = $license_type . '' . $license_number;
+    $entity->title->setValue($license_title);
+  }
+  if ($entity->getEntityType()->id() == 'node' && $entity->bundle() == 'company' && $entity->get('moderation_state')->value == 'published') {
+    // Set date value to last updated field if diffArray is not empty.
+    $diff = \Drupal::service('rb_moderation.diff');
+    if ($entity->id()) {
+      $nodeA = Node::load($entity->id());
+      $nodeB = $entity;
+      $changes = $diff->getDiff($nodeA, $nodeB);
+      if (in_array('Blue Book Rating', array_keys($changes))) {
+        $entity->field_blue_book_rating_timestamp->setvalue(time());
+      }
+      foreach ($changes as $field_label => $change) {
+        if (is_array($change)) {
+          if (md5(serialize($change['nodeA_value'])) == md5(serialize($change['nodeB_value']))) {
+            unset($changes[$field_label]);
+          }
+        }
+        elseif (is_object($change)) {
+          if (md5(json_encode($change['nodeA_value'])) == md5(json_encode($change['nodeB_value']))) {
+            unset($changes[$field_label]);
+          }
+        }
+      }
+      if (!empty($changes)) {
+        $entity->field_last_updated->setvalue(time());
+      }
+      elseif (empty($changes)) {
+        $changes = $diff->getCompanyProfileFieldsDiff($nodeA, $nodeB);
+        foreach ($changes as $field_label => $change) {
+          if (is_array($change)) {
+            if (md5(serialize($change['nodeA_value'])) == md5(serialize($change['nodeB_value']))) {
+              unset($changes[$field_label]);
+            }
+          }
+          elseif (is_object($change)) {
+            if (md5(json_encode($change['nodeA_value'])) == md5(json_encode($change['nodeB_value']))) {
+              unset($changes[$field_label]);
+            }
+          }
+        }
+        if (!empty($changes)) {
+          $entity->field_last_updated->setvalue(time());
+        }
+      }
+    }
+
+    $in_active = $entity->get('field_comp_inactive')->value;
+    if ($in_active == 1) {
+      $entity->status = FALSE;
+    }
+    if ($in_active == 0) {
+      $entity->status = TRUE;
+    }
+    // For update the value in related business tags from "Organic" to "USDA Certified Organic".
+    $field_organic = $entity->get('field_organic')->value;
+    $field_comp_related_business_tags = $entity->get('field_comp_related_business_tags')->getValue();
+    $search = array_search('USDA Certified Organic', array_column($field_comp_related_business_tags, 'value'));
+    if ((!empty($field_organic) && $field_organic == 'usda certified organic') && is_numeric($search)) {
+      $entity->field_comp_related_business_tags[$search] = 'USDA Certified Organic';
+    }
+    elseif ((!empty($field_organic) && $field_organic == 'usda certified organic') && !is_numeric($search)) {
+      $entity->field_comp_related_business_tags[] = 'USDA Certified Organic';
+    }
+    elseif (empty($field_organic) && is_numeric($search)) {
+      $entity->field_comp_related_business_tags[$search] = '';
+    }
+    if (!empty($entity->get('field_comp_operation_primary')->target_id)) {
+      $primary_op = $entity->get('field_comp_operation_primary')->target_id;
+      $ops[] = $primary_op;
+    }
+    $secondary_ops = $entity->get('field_comp_legacy_operation')->getValue();
+    foreach ($secondary_ops as $secondary_op) {
+      $ops[] = $secondary_op['target_id'];
+    }
+    $entity->set('field_comp_op_types', (is_array($ops)) ? array_unique($ops) : []);
+  }
+}
+
+/**
+ *
+ */
+function redbook_pcl_custom_preprocess_views_view_table(&$variables) {
+  if ($variables['view']->id() == 'report_for_users_created') {
+    $rows = &$variables['rows'];
+    $result = &$variables['result'];
+    foreach ($result as $key => $value) {
+      $user_load = $value->_entity;
+      $work = $user_load->get('field_where_i_work')->getValue();
+      $data = [];
+      foreach ($work as $id) {
+        $fc = FieldCollectionItem::load($id['value']);
+        $company_id = $fc->get('field_where_i_work_company')->getValue();
+        if (!empty($company_id) && isset($company_id[0]['target_id'])) {
+          $node_present = _check_nid_present($company_id[0]['target_id']);
+          if (!empty($node_present)) {
+            $company_title = Node::load($company_id[0]['target_id'])->get('title')->getValue();
+            ;
+            $data[] = $company_title[0]['value'];
+          }
+        }
+      }
+      $concat = implode(', ', $data);
+      $rows[$key]['columns']['nothing']['content'][0]['field_output']['#markup'] = Markup::create($concat);
+    }
+  }
+}
+
+/**
+ *
+ */
+function _check_nid_present($nid) {
+  $db_conn = \Drupal::database();
+  $query = $db_conn->select('node_field_data', 'n');
+  $query->fields('n', ['nid']);
+  $query->condition('n.type', 'company');
+  $query->condition('n.nid', $nid);
+  $result = $query->execute()->fetchField();
+  return $result;
+}
+
+/**
+ *
+ */
+function redbook_pcl_custom_user_logout($account) {
+  $destination = drupal_get_destination();
+  $check_user = explode("/", $destination['destination']);
+  $request_uri = \Drupal::request()->getRequestUri();
+  $request_uri = \Drupal::service('path.alias_manager')->getAliasByPath($request_uri);
+  $variables['destination'] = $request_uri;
+  if (strpos($destination['destination'], '/advanced-search') !== FALSE) {
+    $new_uri = substr($variables['destination'], strpos($variables['destination'], "=") + 1);
+    $response = new RedirectResponse($new_uri);
+    $response->send();
+  }
+  elseif ($check_user[1] == 'user') {
+    $response = new RedirectResponse('/');
+    $response->send();
+  }
+  else {
+    $response = new RedirectResponse($destination['destination']);
+    $response->send();
+  }
+}
+
+/**
+ *
+ */
+function redbook_pcl_custom_validate_primary_operation(&$form, FormStateInterface $form_state) {
+  $input_values = $form_state->getUserInput();
+  if (empty($input_values['field_comp_operation_primary']) || $input_values['field_comp_operation_primary'] == '_none') {
+    $form_state->setErrorByName('field_comp_operation_primary', t('Please select primary operation to generate PMG PIN'));
+  }
+}
+
+/**
+ *
+ */
+function get_max_pin_within_range($start, $end, $second_series_start = NULL, $second_series_new_end = NULL) {
+  $conn = Database::getConnection();
+  $max_pin_value = $conn->query('SELECT MAX(pp.field_comp_pmg_pin_value * 1) as max_pin_value FROM {node__field_comp_pmg_pin} pp
+    WHERE pp.field_comp_pmg_pin_value * 1 >= :start AND pp.field_comp_pmg_pin_value * 1 < :end', [':start' => $start, ':end' => $end])
+      ->fetchField();
+  if (empty($max_pin_value)) {
+    $max_pin_value = $start;
+  }
+  elseif ($max_pin_value + 1 == $end) {
+    if (!empty($second_series_start) && !empty($second_series_new_end)) {
+      $max_pin_value = get_max_pin_within_range($second_series_start, $second_series_new_end, NULL, NULL);
+    }
+    else {
+      // The allocated series is completed, Need to update with new values.
+      $max_pin_value = 0;
+    }
+  }
+  else {
+    $max_pin_value = $max_pin_value + 1;
+  }
+  return $max_pin_value;
+}
+
+/**
+ * Method to retrieve US states as an array of strings.
+ *
+ * Keys are us state abbreviations. Values are address objects.
+ * (E.g.; array(... 'IL'=>'Illinois' ...)
+ *
+ * @return array
+ *   Array contains address objects, not simple strings.
+ */
+function _redbook_pcl_get_united_states() {
+  return _redbook_pcl_get_states('US');
+}
+
+/**
+ * Method to retrieve Canadian provinces as an array of strings.
+ *
+ * Keys are us state abbreviations. Values are address objects.
+ * (E.g.; array(... 'ON'=>'Ontario' ...)
+ *
+ * @return array
+ *   Array contains address objects, not simple strings.
+ */
+function _redbook_pcl_get_canadian_provinces() {
+  return _redbook_pcl_get_states('CA');
+}
+
+/**
+ * Method to retrieve an array of states.
+ *
+ * Contains Address-type Subdivisions as keyed strings. Keys are us state
+ * abbreviations. Values are the full title of the state.
+ *
+ * @return array
+ *   Array contains simple strings.
+ */
+function _redbook_pcl_get_states($country_code) {
+  $addressSubdivisionRepository = new SubdivisionRepository();
+  $state_options = [];
+  if (is_string($country_code)) {
+    $country_code = [$country_code];
+  }
+  $subdivisions = $addressSubdivisionRepository->getAll($country_code);
+  foreach ($subdivisions as $code => $subdivision) {
+    $state_options[$code] = $subdivision->getName();
+  }
+  return $state_options;
+}
+
+/**
+ * Helper function to get the company details of the given license node
+ */
+function _get_company_detail_license($nid) {
+  $conn = Database::getConnection();
+  $query = $conn->select('node__field_comp_license', 'field_comp_license');
+  $query->fields('field_comp_license', ['entity_id']);
+  $query->condition('field_comp_license.field_comp_license_target_id', $nid);
+  $entity_id = $query->execute()->fetchfield();
+  if (!empty($entity_id)) {
+    $node_detail = Node::load($entity_id);
+    if (!empty($node_detail)) {
+      $companyname = $node_detail->get('title')->value;
+      $pin = $node_detail->get('field_comp_pmg_pin')->value;
+      $address_loc = $node_detail->get('field_comp_address')->getValue();
+      foreach ($address_loc as $values) {
+        $locality = $values['locality'];
+        $country_code = $values['country_code'];
+        $area_code = $values['administrative_area'];
+      }
+
+      $state_options = [];
+      if (is_string($country_code)) {
+        $country_code = [$country_code];
+      }
+      foreach ($country_code as $code) {
+        $value = new SubdivisionRepository();
+        $subdivisions = $value->getAll([$code]);
+        foreach ($subdivisions as $code => $subdivision) {
+          if (!empty($subdivision)) {
+            $state_options[$code] = $subdivision->getName();
+          }
+        }
+      }
+    }
+  }
+  $company_detail = ['company_name' => $companyname, 'pmg_pin' => $pin, 'locality' => $locality, 'state' => $state_options[$area_code]];
+  return $company_detail;
+}

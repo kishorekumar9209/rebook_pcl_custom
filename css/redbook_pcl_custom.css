@@ -1,0 +1,43 @@
+/* Hierarchial select fields */
+.cm-commodity [data-shs-level="2"] {
+  display: none !important;
+}
+
+.pc-produce-commodity [data-shs-level="1"] {
+  display: none !important;
+}
+
+.pc-produce-commodity .chosen-container,
+.cm-commodity .chosen-container,
+.vr-variety .chosen-container {
+  display: none !important;
+}
+
+/* Applying Error styling for form elements. */
+.form-item input.error,
+.form-item textarea.error,
+.form-item select.error {
+  border-width: 1px;
+  border-color: #e62600;
+  background-color: hsla(15, 75%, 97%, 1);
+  box-shadow: inset 0 5px 5px -5px #b8b8b8;
+  color: #a51b00;
+}
+.form-item input[type="checkbox"].error{
+  outline: 2px solid #a94442;
+}
+.form-item input.error, .form-item textarea.error, .form-item select.error {
+  border: 2px solid red;
+}
+/* Hiding label for field collection field. */
+#edit-field-vr-fc-commodity-0-field-fc-commodity-wrapper label[for] {
+  display: none !important;
+}
+
+/*.block-advanced-search-results-block {
+  margin-top: 35px;
+}*/
+
+.advanced-search-filters .form-item label{
+  display: block;
+}
